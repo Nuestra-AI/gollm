@@ -290,6 +290,7 @@ func NewLLM(opts ...ConfigOption) (LLM, error) {
 	var logger utils.Logger
 	if cfg.Logger != nil {
 		logger = cfg.Logger
+		logger.SetLevel(cfg.LogLevel)
 	} else {
 		logger = utils.NewLogger(cfg.LogLevel)
 	}
