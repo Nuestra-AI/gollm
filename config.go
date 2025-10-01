@@ -98,6 +98,7 @@ var (
 	SetTimeout      = config.SetTimeout      // Sets request timeout duration
 	SetMaxRetries   = config.SetMaxRetries   // Sets maximum retry attempts
 	SetRetryDelay   = config.SetRetryDelay   // Sets delay between retries
+	SetLogger       = config.SetLogger       // Sets a custom logger
 	SetLogLevel     = config.SetLogLevel     // Sets logging verbosity
 	SetExtraHeaders = config.SetExtraHeaders // Sets additional HTTP headers
 
