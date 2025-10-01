@@ -72,6 +72,7 @@ type Config struct {
 	MirostatEta           *float64          `env:"LLM_MIROSTAT_ETA" envDefault:"0.1"`
 	MirostatTau           *float64          `env:"LLM_MIROSTAT_TAU" envDefault:"5.0"`
 	TfsZ                  *float64          `env:"LLM_TFS_Z" envDefault:"1"`
+	Logger                utils.Logger
 	SystemPrompt          string
 	SystemPromptCacheType string
 	ExtraHeaders          map[string]string
@@ -243,6 +244,13 @@ func SetRetryDelay(retryDelay time.Duration) ConfigOption {
 func SetLogLevel(level utils.LogLevel) ConfigOption {
 	return func(c *Config) {
 		c.LogLevel = level
+	}
+}
+
+// SetLogger sets a custom logger.
+func SetLogger(logger utils.Logger) ConfigOption {
+	return func(c *Config) {
+		c.Logger = logger
 	}
 }
 
