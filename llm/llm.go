@@ -279,11 +279,12 @@ func (l *LLMImpl) attemptGenerate(ctx context.Context, prompt *Prompt) (string, 
 		return "", NewLLMError(ErrorTypeRequest, "failed to create request", err)
 	}
 
-	l.logger.Debug("Full API request", "method", req.Method, "url", req.URL.String(), "headers", req.Header, "body", string(reqBody))
 	for k, v := range l.Provider.Headers() {
 		req.Header.Set(k, v)
 		l.logger.Debug("Request header", "provider", l.Provider.Name(), "key", k, "value", v)
 	}
+
+	l.logger.Wire("Full API request", "method", req.Method, "url", req.URL.String(), "headers", req.Header, "body", string(reqBody))
 	resp, err := l.client.Do(req)
 	if err != nil {
 		return "", NewLLMError(ErrorTypeRequest, "failed to send request", err)
@@ -295,7 +296,7 @@ func (l *LLMImpl) attemptGenerate(ctx context.Context, prompt *Prompt) (string, 
 	}
 
 	// Log the full API response
-	l.logger.Debug("Full API response", "body", string(body))
+	l.logger.Wire("Full API response", "body", string(body))
 
 	if resp.StatusCode != http.StatusOK {
 		l.logger.Error("API error", "provider", l.Provider.Name(), "status", resp.StatusCode, "body", string(body))
@@ -418,6 +419,7 @@ func (l *LLMImpl) attemptGenerateWithSchema(ctx context.Context, prompt string, 
 		req.Header.Set(k, v)
 	}
 
+	l.logger.Wire("Full API request", "method", req.Method, "url", req.URL.String(), "headers", req.Header, "body", string(reqBody))
 	resp, err := l.client.Do(req)
 	if err != nil {
 		return "", fullPrompt, NewLLMError(ErrorTypeRequest, "failed to send request", err)
@@ -428,6 +430,9 @@ func (l *LLMImpl) attemptGenerateWithSchema(ctx context.Context, prompt string, 
 	if err != nil {
 		return "", fullPrompt, NewLLMError(ErrorTypeResponse, "failed to read response body", err)
 	}
+
+	// Log the full API response
+	l.logger.Wire("Full API response", "body", string(body))
 
 	if resp.StatusCode != http.StatusOK {
 		l.logger.Error("API error", "provider", l.Provider.Name(), "status", resp.StatusCode, "body", string(body))
@@ -505,6 +510,7 @@ func (l *LLMImpl) Stream(ctx context.Context, prompt *Prompt, opts ...StreamOpti
 	}
 
 	// Make request
+	l.logger.Wire("Full API request", "method", req.Method, "url", req.URL.String(), "headers", req.Header, "body", string(body))
 	resp, err := l.client.Do(req)
 	if err != nil {
 		return nil, NewLLMError(ErrorTypeAPI, "failed to make stream request", err)
