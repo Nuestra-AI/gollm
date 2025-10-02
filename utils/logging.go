@@ -14,11 +14,13 @@ const (
 	LogLevelError
 	LogLevelWarn
 	LogLevelInfo
+	LogLevelWire // level that includes wire-level request/response logging
 	LogLevelDebug
 )
 
 type Logger interface {
 	Debug(msg string, keysAndValues ...interface{})
+	Wire(msg string, keysAndValues ...interface{})
 	Info(msg string, keysAndValues ...interface{})
 	Warn(msg string, keysAndValues ...interface{})
 	Error(msg string, keysAndValues ...interface{})
@@ -49,6 +51,10 @@ func (l *DefaultLogger) log(level LogLevel, msg string, keysAndValues ...interfa
 
 func (l *DefaultLogger) Debug(msg string, keysAndValues ...interface{}) {
 	l.log(LogLevelDebug, msg, keysAndValues...)
+}
+
+func (l *DefaultLogger) Wire(msg string, keysAndValues ...interface{}) {
+	l.log(LogLevelWire, msg, keysAndValues...)
 }
 
 func (l *DefaultLogger) Info(msg string, keysAndValues ...interface{}) {
