@@ -187,14 +187,25 @@ func (p *OpenAIProvider) PrepareRequest(prompt string, options map[string]interf
 	if tools, ok := options["tools"].([]utils.Tool); ok && len(tools) > 0 {
 		openAITools := make([]map[string]interface{}, len(tools))
 		for i, tool := range tools {
-			openAITools[i] = map[string]interface{}{
-				"type": "function",
-				"function": map[string]interface{}{
-					"name":        tool.Function.Name,
-					"description": tool.Function.Description,
-					"parameters":  tool.Function.Parameters,
-				},
-				"strict": true, // Add this if you want strict mode
+			if !options["strict_tools"].(bool) {
+				openAITools[i] = map[string]interface{}{
+					"type": "function",
+					"function": map[string]interface{}{
+						"name":        tool.Function.Name,
+						"description": tool.Function.Description,
+						"parameters":  tool.Function.Parameters,
+					},
+				}
+			} else {
+				openAITools[i] = map[string]interface{}{
+					"type": "function",
+					"function": map[string]interface{}{
+						"name":        tool.Function.Name,
+						"description": tool.Function.Description,
+						"parameters":  tool.Function.Parameters,
+					},
+					"strict": true, // Add this if you want strict mode
+				}
 			}
 		}
 		request["tools"] = openAITools
@@ -212,7 +223,7 @@ func (p *OpenAIProvider) PrepareRequest(prompt string, options map[string]interf
 
 	// Then add options from the function parameters (may override provider options)
 	for k, v := range options {
-		if k != "tools" && k != "tool_choice" && k != "system_prompt" {
+		if k != "tools" && k != "tool_choice" && k != "strict_tools" && k != "system_prompt" {
 			mergedOptions[k] = v
 		}
 	}
@@ -314,14 +325,14 @@ func (p *OpenAIProvider) PrepareRequestWithSchema(prompt string, options map[str
 
 	// First add options from provider (p.options)
 	for k, v := range p.options {
-		if k != "system_prompt" {
+		if k != "system_prompt" && k != "strict_tools" {
 			mergedOptions[k] = v
 		}
 	}
 
 	// Then add options from the function parameters (may override provider options)
 	for k, v := range options {
-		if k != "system_prompt" {
+		if k != "system_prompt" && k != "strict_tools" {
 			mergedOptions[k] = v
 		}
 	}
@@ -626,14 +637,25 @@ func (p *OpenAIProvider) PrepareRequestWithMessages(messages []types.MemoryMessa
 	if tools, ok := options["tools"].([]utils.Tool); ok && len(tools) > 0 {
 		openAITools := make([]map[string]interface{}, len(tools))
 		for i, tool := range tools {
-			openAITools[i] = map[string]interface{}{
-				"type": "function",
-				"function": map[string]interface{}{
-					"name":        tool.Function.Name,
-					"description": tool.Function.Description,
-					"parameters":  tool.Function.Parameters,
-				},
-				"strict": true, // Add this if you want strict mode
+			if !options["strict_tools"].(bool) {
+				openAITools[i] = map[string]interface{}{
+					"type": "function",
+					"function": map[string]interface{}{
+						"name":        tool.Function.Name,
+						"description": tool.Function.Description,
+						"parameters":  tool.Function.Parameters,
+					},
+				}
+			} else {
+				openAITools[i] = map[string]interface{}{
+					"type": "function",
+					"function": map[string]interface{}{
+						"name":        tool.Function.Name,
+						"description": tool.Function.Description,
+						"parameters":  tool.Function.Parameters,
+					},
+					"strict": true, // Add this if you want strict mode
+				}
 			}
 		}
 		request["tools"] = openAITools
@@ -651,7 +673,7 @@ func (p *OpenAIProvider) PrepareRequestWithMessages(messages []types.MemoryMessa
 
 	// Then add options from the function parameters (may override provider options)
 	for k, v := range options {
-		if k != "tools" && k != "tool_choice" && k != "system_prompt" && k != "structured_messages" {
+		if k != "tools" && k != "tool_choice" && k != "strict_tools" && k != "system_prompt" && k != "structured_messages" {
 			mergedOptions[k] = v
 		}
 	}
