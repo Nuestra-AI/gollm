@@ -68,6 +68,19 @@ func (p *OpenAIProvider) needsMaxCompletionTokens() bool {
 	return false
 }
 
+func (p *OpenAIProvider) needsNoTemperature() bool {
+	// Check for models that start with "o3"
+	if strings.HasPrefix(p.model, "o3") {
+		return true
+	}
+
+	if strings.Contains(p.model, "-5") {
+		return true
+	}
+
+	return false
+}
+
 // SetOption sets a specific option for the OpenAI provider.
 // Supported options include:
 //   - temperature: Controls randomness (0.0 to 2.0)
@@ -91,6 +104,12 @@ func (p *OpenAIProvider) SetOption(key string, value interface{}) {
 	} else if key == "max_completion_tokens" {
 		// If explicitly setting max_completion_tokens, remove max_tokens to avoid conflicts
 		delete(p.options, "max_tokens")
+	}
+
+	if key == "temperature" {
+		if p.needsNoTemperature() {
+			delete(p.options, "temperature")
+		}
 	}
 
 	p.options[key] = value
@@ -261,6 +280,10 @@ func (p *OpenAIProvider) PrepareRequest(prompt string, options map[string]interf
 		}
 	}
 
+	if p.needsNoTemperature() {
+		delete(mergedOptions, "temperature")
+	}
+
 	// Add merged options to the request
 	for k, v := range mergedOptions {
 		request[k] = v
@@ -368,6 +391,10 @@ func (p *OpenAIProvider) PrepareRequestWithSchema(prompt string, options map[str
 			mergedOptions["max_tokens"] = mergedOptions["max_completion_tokens"]
 			delete(mergedOptions, "max_completion_tokens")
 		}
+	}
+
+	if p.needsNoTemperature() {
+		delete(mergedOptions, "temperature")
 	}
 
 	// Add merged options to the request
@@ -548,6 +575,10 @@ func (p *OpenAIProvider) PrepareStreamRequest(prompt string, options map[string]
 			mergedOptions["max_tokens"] = mergedOptions["max_completion_tokens"]
 			delete(mergedOptions, "max_completion_tokens")
 		}
+	}
+
+	if p.needsNoTemperature() {
+		delete(mergedOptions, "temperature")
 	}
 
 	// Add merged options to the request
@@ -741,6 +772,10 @@ func (p *OpenAIProvider) PrepareRequestWithMessages(messages []types.MemoryMessa
 			mergedOptions["max_tokens"] = mergedOptions["max_completion_tokens"]
 			delete(mergedOptions, "max_completion_tokens")
 		}
+	}
+
+	if p.needsNoTemperature() {
+		delete(mergedOptions, "temperature")
 	}
 
 	// Add merged options to the request
