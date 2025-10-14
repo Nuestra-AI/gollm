@@ -61,7 +61,7 @@ func (p *OpenAIProvider) needsMaxCompletionTokens() bool {
 	}
 
 	// Check for gpt-4o and similar models
-	if strings.Contains(p.model, "4o") || strings.Contains(p.model, "-o") {
+	if strings.Contains(p.model, "4o") || strings.Contains(p.model, "-o") || strings.Contains(p.model, "-5") {
 		return true
 	}
 
