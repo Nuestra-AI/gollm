@@ -68,6 +68,20 @@ func (p *OpenAIProvider) needsMaxCompletionTokens() bool {
 	return false
 }
 
+func (p *OpenAIProvider) needsReasoningEffort() bool {
+	// Check for models that start with "o"
+	if strings.HasPrefix(p.model, "o") {
+		return true
+	}
+
+	// Check for gpt-5
+	if strings.Contains(p.model, "-5") {
+		return true
+	}
+
+	return false
+}
+
 func (p *OpenAIProvider) needsNoTemperature() bool {
 	// Check for models that start with "o3"
 	if strings.HasPrefix(p.model, "o3") {
@@ -104,6 +118,14 @@ func (p *OpenAIProvider) SetOption(key string, value interface{}) {
 	} else if key == "max_completion_tokens" {
 		// If explicitly setting max_completion_tokens, remove max_tokens to avoid conflicts
 		delete(p.options, "max_tokens")
+	}
+
+	// if the option is reasoning_effort, check if the model supports it
+	if key == "reasoning_effort" {
+		// if it doesn't, remove it from options
+		if !p.needsReasoningEffort() {
+			delete(p.options, "reasoning_effort")
+		}
 	}
 
 	if key == "temperature" {
@@ -264,6 +286,11 @@ func (p *OpenAIProvider) PrepareRequest(prompt string, options map[string]interf
 		}
 	}
 
+	// Handle reasoning_effort option
+	if !p.needsReasoningEffort() {
+		delete(mergedOptions, "reasoning_effort")
+	}
+
 	if p.needsNoTemperature() {
 		delete(mergedOptions, "temperature")
 	}
@@ -375,6 +402,11 @@ func (p *OpenAIProvider) PrepareRequestWithSchema(prompt string, options map[str
 			mergedOptions["max_tokens"] = mergedOptions["max_completion_tokens"]
 			delete(mergedOptions, "max_completion_tokens")
 		}
+	}
+
+	// Handle reasoning_effort option
+	if !p.needsReasoningEffort() {
+		delete(mergedOptions, "reasoning_effort")
 	}
 
 	if p.needsNoTemperature() {
@@ -561,6 +593,11 @@ func (p *OpenAIProvider) PrepareStreamRequest(prompt string, options map[string]
 		}
 	}
 
+	// Handle reasoning_effort option
+	if !p.needsReasoningEffort() {
+		delete(mergedOptions, "reasoning_effort")
+	}
+
 	if p.needsNoTemperature() {
 		delete(mergedOptions, "temperature")
 	}
@@ -724,6 +761,11 @@ func (p *OpenAIProvider) PrepareRequestWithMessages(messages []types.MemoryMessa
 			mergedOptions["max_tokens"] = mergedOptions["max_completion_tokens"]
 			delete(mergedOptions, "max_completion_tokens")
 		}
+	}
+
+	// Handle reasoning_effort option
+	if !p.needsReasoningEffort() {
+		delete(mergedOptions, "reasoning_effort")
 	}
 
 	if p.needsNoTemperature() {
