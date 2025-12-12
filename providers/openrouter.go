@@ -407,6 +407,127 @@ func (p *OpenRouterProvider) ParseResponse(body []byte) (string, error) {
 	return textResp.Choices[0].Text, nil
 }
 
+// ParseResponseWithUsage extracts both the generated text and response details from the OpenRouter API response.
+// OpenRouter uses an OpenAI-compatible response format.
+//
+// Parameters:
+//   - body: Raw API response body
+//
+// Returns:
+//   - Generated text content
+//   - Response details (or nil if not available)
+//   - Any error encountered during parsing
+func (p *OpenRouterProvider) ParseResponseWithUsage(body []byte) (string, *types.ResponseDetails, error) {
+	// First try to parse as chat completion to see if it's a chat/completions response
+	var chatResp struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+			FinishReason       string `json:"finish_reason"`
+			NativeFinishReason string `json:"native_finish_reason"`
+		} `json:"choices"`
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
+		} `json:"usage"`
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+		ID    string `json:"id"`
+		Model string `json:"model"`
+	}
+
+	// Try to parse as a chat completion
+	chatErr := json.Unmarshal(body, &chatResp)
+
+	// Check if we have valid chat completion choices
+	if chatErr == nil && len(chatResp.Choices) > 0 && chatResp.Choices[0].Message.Content != "" {
+		// This is a chat completion response
+
+		// Check for errors
+		if chatResp.Error.Message != "" {
+			return "", nil, fmt.Errorf("OpenRouter API error: %s", chatResp.Error.Message)
+		}
+
+		// Store the generation ID and used model in the logger for potential later use
+		if chatResp.ID != "" {
+			p.logger.Debug("Generation ID", "id", chatResp.ID)
+		}
+		if chatResp.Model != "" && chatResp.Model != p.model {
+			p.logger.Info("Model used", "requested", p.model, "actual", chatResp.Model)
+		}
+
+		details := &types.ResponseDetails{
+			ID:    chatResp.ID,
+			Model: chatResp.Model,
+			TokenUsage: types.TokenUsage{
+				PromptTokens:     chatResp.Usage.PromptTokens,
+				CompletionTokens: chatResp.Usage.CompletionTokens,
+				TotalTokens:      chatResp.Usage.TotalTokens,
+			},
+		}
+
+		return chatResp.Choices[0].Message.Content, details, nil
+	}
+
+	// If it wasn't a valid chat completion, try parsing as a text completion
+	var textResp struct {
+		Choices []struct {
+			Text string `json:"text"`
+		} `json:"choices"`
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
+		} `json:"usage"`
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+		ID    string `json:"id"`
+		Model string `json:"model"`
+	}
+
+	if err := json.Unmarshal(body, &textResp); err != nil {
+		// If we can't parse as text completion either, return the original chat parsing error
+		return "", nil, fmt.Errorf("error parsing OpenRouter response: %w", chatErr)
+	}
+
+	// Check for errors
+	if textResp.Error.Message != "" {
+		return "", nil, fmt.Errorf("OpenRouter API error: %s", textResp.Error.Message)
+	}
+
+	// Check if we have at least one choice
+	if len(textResp.Choices) == 0 {
+		return "", nil, fmt.Errorf("no completion choices in OpenRouter response")
+	}
+
+	// Store the generation ID and used model in the logger for potential later use
+	if textResp.ID != "" {
+		p.logger.Debug("Generation ID (text completion)", "id", textResp.ID)
+	}
+	if textResp.Model != "" && textResp.Model != p.model {
+		p.logger.Info("Model used (text completion)", "requested", p.model, "actual", textResp.Model)
+	}
+
+	p.logger.Debug("Parsed text completion", "text", textResp.Choices[0].Text)
+
+	details := &types.ResponseDetails{
+		ID:    textResp.ID,
+		Model: textResp.Model,
+		TokenUsage: types.TokenUsage{
+			PromptTokens:     textResp.Usage.PromptTokens,
+			CompletionTokens: textResp.Usage.CompletionTokens,
+			TotalTokens:      textResp.Usage.TotalTokens,
+		},
+	}
+
+	// Return text completion
+	return textResp.Choices[0].Text, details, nil
+}
+
 // HandleFunctionCalls processes function/tool calling in OpenRouter responses.
 func (p *OpenRouterProvider) HandleFunctionCalls(body []byte) ([]byte, error) {
 	// OpenRouter supports function calling for compatible models

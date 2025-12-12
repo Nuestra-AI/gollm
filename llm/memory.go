@@ -375,6 +375,44 @@ func (l *LLMWithMemory) GenerateWithSchema(ctx context.Context, prompt *Prompt, 
 	return response, nil
 }
 
+// GenerateWithUsage produces text and returns response details while maintaining memory.
+// The prompt and response are added to the conversation memory.
+func (l *LLMWithMemory) GenerateWithUsage(ctx context.Context, prompt *Prompt, opts ...GenerateOption) (string, *types.ResponseDetails, error) {
+	l.memory.Add("user", prompt.Input)
+	fullPrompt := l.memory.GetPrompt()
+
+	memoryPrompt := &Prompt{
+		Input: fullPrompt,
+	}
+
+	response, details, err := l.LLM.GenerateWithUsage(ctx, memoryPrompt, opts...)
+	if err != nil {
+		return "", nil, err
+	}
+
+	l.memory.Add("assistant", response)
+	return response, details, nil
+}
+
+// GenerateWithSchemaAndUsage generates text conforming to a schema and returns response details while maintaining memory.
+// The prompt and response are added to the conversation memory.
+func (l *LLMWithMemory) GenerateWithSchemaAndUsage(ctx context.Context, prompt *Prompt, schema interface{}, opts ...GenerateOption) (string, *types.ResponseDetails, error) {
+	l.memory.Add("user", prompt.Input)
+	fullPrompt := l.memory.GetPrompt()
+
+	memoryPrompt := &Prompt{
+		Input: fullPrompt,
+	}
+
+	response, details, err := l.LLM.GenerateWithSchemaAndUsage(ctx, memoryPrompt, schema, opts...)
+	if err != nil {
+		return "", nil, err
+	}
+
+	l.memory.Add("assistant", response)
+	return response, details, nil
+}
+
 // AddToMemory adds a message to memory with the default role format.
 // This is a convenience method that wraps memory.Add.
 func (l *LLMWithMemory) AddToMemory(role, content string) {

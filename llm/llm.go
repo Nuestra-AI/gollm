@@ -33,6 +33,14 @@ type LLM interface {
 	// or other error types as per Generate.
 	GenerateWithSchema(ctx context.Context, prompt *Prompt, schema interface{}, opts ...GenerateOption) (string, error)
 
+	// GenerateWithUsage produces text and returns response details including token usage.
+	// Returns the generated text, response details, and any error encountered.
+	GenerateWithUsage(ctx context.Context, prompt *Prompt, opts ...GenerateOption) (string, *types.ResponseDetails, error)
+
+	// GenerateWithSchemaAndUsage generates text conforming to a schema and returns response details.
+	// Returns the generated text, response details, and any error encountered.
+	GenerateWithSchemaAndUsage(ctx context.Context, prompt *Prompt, schema interface{}, opts ...GenerateOption) (string, *types.ResponseDetails, error)
+
 	// Stream initiates a streaming response from the LLM.
 	// Returns ErrorTypeUnsupported if the provider doesn't support streaming.
 	Stream(ctx context.Context, prompt *Prompt, opts ...StreamOption) (TokenStream, error)
@@ -374,6 +382,283 @@ func (l *LLMImpl) GenerateWithSchema(ctx context.Context, prompt *Prompt, schema
 	}
 
 	return "", fmt.Errorf("failed to generate with schema after %d attempts: %w", l.MaxRetries+1, lastErr)
+}
+
+// GenerateWithUsage produces text based on the given prompt and returns token usage information.
+// It handles retries, logging, and error management similar to Generate, but also extracts usage data.
+//
+// Returns:
+//   - Generated text response
+//   - Response details (or nil if not available)
+//   - ErrorTypeRequest for request preparation failures
+//   - ErrorTypeAPI for provider API errors
+//   - ErrorTypeResponse for response processing issues
+//   - ErrorTypeRateLimit if provider rate limit is exceeded
+func (l *LLMImpl) GenerateWithUsage(ctx context.Context, prompt *Prompt, opts ...GenerateOption) (string, *types.ResponseDetails, error) {
+	config := &GenerateConfig{}
+	for _, opt := range opts {
+		opt(config)
+	}
+
+	// Set the system prompt in the LLM's options
+	if prompt.SystemPrompt != "" {
+		l.SetOption("system_prompt", prompt.SystemPrompt)
+	}
+
+	var result string
+	var details *types.ResponseDetails
+	var lastErr error
+
+	for attempt := 0; attempt <= l.MaxRetries; attempt++ {
+		l.logger.Debug("Generating text with usage tracking", "provider", l.Provider.Name(), "prompt", prompt.String(), "attempt", attempt+1)
+
+		result, details, lastErr = l.attemptGenerateWithUsage(ctx, prompt)
+		if lastErr == nil {
+			return result, details, nil
+		}
+
+		l.logger.Warn("Generation attempt failed", "error", lastErr, "attempt", attempt+1)
+		if attempt < l.MaxRetries {
+			if err := l.wait(ctx); err != nil {
+				return "", nil, err
+			}
+		}
+	}
+
+	return "", nil, fmt.Errorf("failed to generate after %d attempts: %w", l.MaxRetries+1, lastErr)
+}
+
+// GenerateWithSchemaAndUsage generates text conforming to a schema and returns response details.
+// This combines schema validation with usage tracking.
+//
+// Returns:
+//   - Generated text response
+//   - Response details (or nil if not available)
+//   - ErrorTypeInvalidInput for schema validation failures
+//   - Other error types as per GenerateWithUsage
+func (l *LLMImpl) GenerateWithSchemaAndUsage(ctx context.Context, prompt *Prompt, schema interface{}, opts ...GenerateOption) (string, *types.ResponseDetails, error) {
+	config := &GenerateConfig{}
+	for _, opt := range opts {
+		opt(config)
+	}
+
+	var result string
+	var details *types.ResponseDetails
+	var lastErr error
+
+	for attempt := 0; attempt <= l.MaxRetries; attempt++ {
+		l.logger.Debug("Generating text with schema and usage tracking", "provider", l.Provider.Name(), "prompt", prompt.String(), "attempt", attempt+1)
+
+		result, details, _, lastErr = l.attemptGenerateWithSchemaAndUsage(ctx, prompt.String(), schema)
+		if lastErr == nil {
+			return result, details, nil
+		}
+
+		l.logger.Warn("Generation attempt with schema failed", "error", lastErr, "attempt", attempt+1)
+		if attempt < l.MaxRetries {
+			if err := l.wait(ctx); err != nil {
+				return "", nil, err
+			}
+		}
+	}
+
+	return "", nil, fmt.Errorf("failed to generate with schema after %d attempts: %w", l.MaxRetries+1, lastErr)
+}
+
+// attemptGenerateWithUsage makes a single attempt to generate text and track usage.
+// It's similar to attemptGenerate but extracts response details from the response.
+//
+// Returns:
+//   - Generated text response
+//   - Response details (or nil if not available)
+//   - Any error encountered during the attempt
+func (l *LLMImpl) attemptGenerateWithUsage(ctx context.Context, prompt *Prompt) (string, *types.ResponseDetails, error) {
+	// Create a new options map that includes both l.Options and prompt-specific options
+	options := make(map[string]interface{})
+
+	// Safely read from the Options map
+	l.optionsMutex.RLock()
+	for k, v := range l.Options {
+		options[k] = v
+	}
+	l.optionsMutex.RUnlock()
+
+	// Add Tools and ToolChoice to options
+	if len(prompt.Tools) > 0 {
+		options["tools"] = prompt.Tools
+	}
+	if len(prompt.ToolChoice) > 0 {
+		options["tool_choice"] = prompt.ToolChoice
+	}
+
+	var reqBody []byte
+	var err error
+
+	// Check if we have structured messages
+	l.optionsMutex.RLock()
+	structuredMessages, hasStructuredMessages := l.Options["structured_messages"]
+	l.optionsMutex.RUnlock()
+
+	if hasStructuredMessages {
+		// Use the structured messages API if the provider supports it
+		if prepareWithMessages, ok := l.Provider.(interface {
+			PrepareRequestWithMessages(messages []types.MemoryMessage, options map[string]interface{}) ([]byte, error)
+		}); ok {
+			messages, ok := structuredMessages.([]types.MemoryMessage)
+			if ok {
+				l.logger.Debug("Using structured messages API", "message_count", len(messages))
+				reqBody, err = prepareWithMessages.PrepareRequestWithMessages(messages, options)
+			} else {
+				l.logger.Warn("Invalid structured_messages format", "type", fmt.Sprintf("%T", structuredMessages))
+				reqBody, err = l.Provider.PrepareRequest(prompt.String(), options)
+			}
+		} else {
+			l.logger.Debug("Provider does not support structured messages API", "provider", l.Provider.Name())
+			reqBody, err = l.Provider.PrepareRequest(prompt.String(), options)
+		}
+	} else {
+		// Standard request preparation
+		reqBody, err = l.Provider.PrepareRequest(prompt.String(), options)
+	}
+
+	if err != nil {
+		return "", nil, NewLLMError(ErrorTypeRequest, "failed to prepare request", err)
+	}
+
+	l.logger.Debug("Full request body", "body", string(reqBody))
+	req, err := http.NewRequestWithContext(ctx, "POST", l.Provider.Endpoint(), bytes.NewReader(reqBody))
+	if err != nil {
+		return "", nil, NewLLMError(ErrorTypeRequest, "failed to create request", err)
+	}
+
+	for k, v := range l.Provider.Headers() {
+		req.Header.Set(k, v)
+	}
+
+	l.logger.Wire("Full API request", "method", req.Method, "url", req.URL.String(), "headers", req.Header, "body", string(reqBody))
+	resp, err := l.client.Do(req)
+	if err != nil {
+		return "", nil, NewLLMError(ErrorTypeRequest, "failed to send request", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", nil, NewLLMError(ErrorTypeResponse, "failed to read response body", err)
+	}
+
+	l.logger.Wire("Full API response", "body", string(body))
+
+	if resp.StatusCode != http.StatusOK {
+		l.logger.Error("API error", "provider", l.Provider.Name(), "status", resp.StatusCode, "body", string(body))
+		return "", nil, NewLLMError(ErrorTypeAPI, fmt.Sprintf("API error: status code %d", resp.StatusCode), nil)
+	}
+
+	// Try to use ParseResponseWithUsage if available
+	result, details, err := l.Provider.ParseResponseWithUsage(body)
+	if err != nil {
+		return "", nil, NewLLMError(ErrorTypeResponse, "failed to parse response", err)
+	}
+
+	if details != nil {
+		l.logger.Debug("Token usage", "prompt_tokens", details.TokenUsage.PromptTokens, "completion_tokens", details.TokenUsage.CompletionTokens, "total_tokens", details.TokenUsage.TotalTokens)
+		if details.TokenUsage.CacheReadInputTokens > 0 || details.TokenUsage.CacheCreationInputTokens > 0 {
+			l.logger.Debug("Cache usage", "cache_creation_tokens", details.TokenUsage.CacheCreationInputTokens, "cache_read_tokens", details.TokenUsage.CacheReadInputTokens)
+		}
+		if details.ID != "" {
+			l.logger.Debug("Response ID", "id", details.ID)
+		}
+	}
+
+	l.logger.Debug("Text generated successfully", "result", result)
+	return result, details, nil
+}
+
+// attemptGenerateWithSchemaAndUsage makes a single attempt to generate text with schema validation and response details.
+// It combines schema validation with response details extraction.
+//
+// Returns:
+//   - Generated text response
+//   - Response details (or nil if not available)
+//   - Full prompt used for generation
+//   - Any error encountered during the attempt
+func (l *LLMImpl) attemptGenerateWithSchemaAndUsage(ctx context.Context, prompt string, schema interface{}) (string, *types.ResponseDetails, string, error) {
+	var reqBody []byte
+	var err error
+	var fullPrompt string
+
+	l.optionsMutex.RLock()
+	options := make(map[string]interface{})
+	for k, v := range l.Options {
+		options[k] = v
+	}
+	l.optionsMutex.RUnlock()
+
+	if l.SupportsJSONSchema() {
+		reqBody, err = l.Provider.PrepareRequestWithSchema(prompt, options, schema)
+		fullPrompt = prompt
+	} else {
+		fullPrompt = l.preparePromptWithSchema(prompt, schema)
+		reqBody, err = l.Provider.PrepareRequest(fullPrompt, options)
+	}
+
+	if err != nil {
+		return "", nil, fullPrompt, NewLLMError(ErrorTypeRequest, "failed to prepare request", err)
+	}
+
+	l.logger.Debug("Request body", "provider", l.Provider.Name(), "body", string(reqBody))
+
+	req, err := http.NewRequestWithContext(ctx, "POST", l.Provider.Endpoint(), bytes.NewReader(reqBody))
+	if err != nil {
+		return "", nil, fullPrompt, NewLLMError(ErrorTypeRequest, "failed to create request", err)
+	}
+
+	for k, v := range l.Provider.Headers() {
+		req.Header.Set(k, v)
+	}
+
+	l.logger.Wire("Full API request", "method", req.Method, "url", req.URL.String(), "headers", req.Header, "body", string(reqBody))
+	resp, err := l.client.Do(req)
+	if err != nil {
+		return "", nil, fullPrompt, NewLLMError(ErrorTypeRequest, "failed to send request", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", nil, fullPrompt, NewLLMError(ErrorTypeResponse, "failed to read response body", err)
+	}
+
+	l.logger.Wire("Full API response", "body", string(body))
+
+	if resp.StatusCode != http.StatusOK {
+		l.logger.Error("API error", "provider", l.Provider.Name(), "status", resp.StatusCode, "body", string(body))
+		return "", nil, fullPrompt, NewLLMError(ErrorTypeAPI, fmt.Sprintf("API error: status code %d", resp.StatusCode), nil)
+	}
+
+	// Try to use ParseResponseWithUsage
+	result, details, err := l.Provider.ParseResponseWithUsage(body)
+	if err != nil {
+		return "", nil, fullPrompt, NewLLMError(ErrorTypeResponse, "failed to parse response", err)
+	}
+
+	// Validate the result against the schema
+	if err := ValidateAgainstSchema(result, schema); err != nil {
+		return "", nil, fullPrompt, NewLLMError(ErrorTypeResponse, "response does not match schema", err)
+	}
+
+	if details != nil {
+		l.logger.Debug("Token usage", "prompt_tokens", details.TokenUsage.PromptTokens, "completion_tokens", details.TokenUsage.CompletionTokens, "total_tokens", details.TokenUsage.TotalTokens)
+		if details.TokenUsage.CacheReadInputTokens > 0 || details.TokenUsage.CacheCreationInputTokens > 0 {
+			l.logger.Debug("Cache usage", "cache_creation_tokens", details.TokenUsage.CacheCreationInputTokens, "cache_read_tokens", details.TokenUsage.CacheReadInputTokens)
+		}
+		if details.ID != "" {
+			l.logger.Debug("Response ID", "id", details.ID)
+		}
+	}
+
+	l.logger.Debug("Text generated successfully", "result", result)
+	return result, details, fullPrompt, nil
 }
 
 // attemptGenerateWithSchema makes a single attempt to generate text using the provider and a JSON schema.

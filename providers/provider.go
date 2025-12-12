@@ -52,6 +52,11 @@ type Provider interface {
 	// It handles provider-specific response formats and error cases.
 	ParseResponse(body []byte) (string, error)
 
+	// ParseResponseWithUsage extracts both the generated text and response details from the API response.
+	// It handles provider-specific response formats and normalizes data to a common structure.
+	// Returns the generated text, response details (or nil if not available), and any error encountered.
+	ParseResponseWithUsage(body []byte) (string, *types.ResponseDetails, error)
+
 	// SetExtraHeaders configures additional HTTP headers for API requests.
 	// This is useful for provider-specific features or authentication methods.
 	SetExtraHeaders(extraHeaders map[string]string)

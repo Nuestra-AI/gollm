@@ -170,6 +170,27 @@ func (p *GenericProvider) ParseResponse(body []byte) (string, error) {
 	}
 }
 
+// ParseResponseWithUsage extracts both the generated text and response details from the API response.
+// It delegates to type-specific parsers based on the provider's API format.
+//
+// Parameters:
+//   - body: Raw API response body
+//
+// Returns:
+//   - Generated text content
+//   - Response details (or nil if not available)
+//   - Any error encountered during parsing
+func (p *GenericProvider) ParseResponseWithUsage(body []byte) (string, *types.ResponseDetails, error) {
+	switch p.config.Type {
+	case TypeOpenAI:
+		return p.parseOpenAIResponseWithUsage(body)
+	case TypeAnthropic, TypeClaude:
+		return p.parseAnthropicResponseWithUsage(body)
+	default:
+		return "", nil, fmt.Errorf("unsupported provider type: %s", p.config.Type)
+	}
+}
+
 // SetExtraHeaders configures additional HTTP headers for API requests.
 func (p *GenericProvider) SetExtraHeaders(extraHeaders map[string]string) {
 	if extraHeaders == nil {
@@ -337,6 +358,59 @@ func (p *GenericProvider) parseOpenAIResponse(body []byte) (string, error) {
 	return response.Choices[0].Message.Content, nil
 }
 
+func (p *GenericProvider) parseOpenAIResponseWithUsage(body []byte) (string, *types.ResponseDetails, error) {
+	var response struct {
+		ID      string `json:"id"`
+		Model   string `json:"model"`
+		Choices []struct {
+			Message struct {
+				Content      string `json:"content"`
+				FunctionCall struct {
+					Arguments string `json:"arguments"`
+				} `json:"function_call"`
+			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
+		} `json:"usage"`
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+
+	if err := json.Unmarshal(body, &response); err != nil {
+		return "", nil, fmt.Errorf("failed to parse response: %v", err)
+	}
+
+	if response.Error.Message != "" {
+		return "", nil, fmt.Errorf("API error: %s", response.Error.Message)
+	}
+
+	if len(response.Choices) == 0 {
+		return "", nil, fmt.Errorf("empty response from API")
+	}
+
+	details := &types.ResponseDetails{
+		ID:    response.ID,
+		Model: response.Model,
+		TokenUsage: types.TokenUsage{
+			PromptTokens:     response.Usage.PromptTokens,
+			CompletionTokens: response.Usage.CompletionTokens,
+			TotalTokens:      response.Usage.TotalTokens,
+		},
+	}
+
+	// Check for function calling response
+	if response.Choices[0].Message.FunctionCall.Arguments != "" {
+		return response.Choices[0].Message.FunctionCall.Arguments, details, nil
+	}
+
+	return response.Choices[0].Message.Content, details, nil
+}
+
 func (p *GenericProvider) handleOpenAIFunctionCalls(body []byte) ([]byte, error) {
 	// Implementation for handling OpenAI function calls
 	return body, nil // Simplified for now
@@ -457,6 +531,51 @@ func (p *GenericProvider) parseAnthropicResponse(body []byte) (string, error) {
 	}
 
 	return response.Content[0].Text, nil
+}
+
+func (p *GenericProvider) parseAnthropicResponseWithUsage(body []byte) (string, *types.ResponseDetails, error) {
+	var response struct {
+		ID      string `json:"id"`
+		Model   string `json:"model"`
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+		Usage struct {
+			InputTokens              int `json:"input_tokens"`
+			OutputTokens             int `json:"output_tokens"`
+			CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+			CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+		} `json:"usage"`
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+
+	if err := json.Unmarshal(body, &response); err != nil {
+		return "", nil, fmt.Errorf("failed to parse response: %v", err)
+	}
+
+	if response.Error.Message != "" {
+		return "", nil, fmt.Errorf("API error: %s", response.Error.Message)
+	}
+
+	if len(response.Content) == 0 {
+		return "", nil, fmt.Errorf("empty response from API")
+	}
+
+	details := &types.ResponseDetails{
+		ID:    response.ID,
+		Model: response.Model,
+		TokenUsage: types.TokenUsage{
+			PromptTokens:             response.Usage.InputTokens,
+			CompletionTokens:         response.Usage.OutputTokens,
+			TotalTokens:              response.Usage.InputTokens + response.Usage.OutputTokens,
+			CacheCreationInputTokens: response.Usage.CacheCreationInputTokens,
+			CacheReadInputTokens:     response.Usage.CacheReadInputTokens,
+		},
+	}
+
+	return response.Content[0].Text, details, nil
 }
 
 func (p *GenericProvider) parseAnthropicStreamResponse(chunk []byte) (string, error) {

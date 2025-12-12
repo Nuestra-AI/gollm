@@ -406,6 +406,137 @@ func (p *AnthropicProvider) ParseResponse(body []byte) (string, error) {
 	return result, nil
 }
 
+// ParseResponseWithUsage extracts both the generated text and response details from the Anthropic API response.
+// It handles Anthropic-specific response formats and normalizes data to a common structure.
+//
+// Parameters:
+//   - body: Raw API response body
+//
+// Returns:
+//   - Generated text content
+//   - Response details (or nil if not available)
+//   - Any error encountered during parsing
+func (p *AnthropicProvider) ParseResponseWithUsage(body []byte) (string, *types.ResponseDetails, error) {
+	p.logger.Debug("Raw API response: %s", string(body))
+
+	var response struct {
+		ID      string `json:"id"`
+		Type    string `json:"type"`
+		Role    string `json:"role"`
+		Model   string `json:"model"`
+		Content []struct {
+			Type  string          `json:"type"`
+			Text  string          `json:"text,omitempty"`
+			ID    string          `json:"id,omitempty"`
+			Name  string          `json:"name,omitempty"`
+			Input json.RawMessage `json:"input,omitempty"`
+		} `json:"content"`
+		StopReason string  `json:"stop_reason"`
+		StopSeq    *string `json:"stop_sequence"`
+		Usage      struct {
+			InputTokens              int `json:"input_tokens"`
+			CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+			CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+			OutputTokens             int `json:"output_tokens"`
+		} `json:"usage"`
+	}
+
+	if err := json.Unmarshal(body, &response); err != nil {
+		return "", nil, fmt.Errorf("error parsing response: %w", err)
+	}
+
+	if len(response.Content) == 0 {
+		return "", nil, fmt.Errorf("empty response from LLM")
+	}
+
+	// Extract and normalize response details including ID and usage information
+	details := &types.ResponseDetails{
+		ID:    response.ID,
+		Model: response.Model,
+		TokenUsage: types.TokenUsage{
+			PromptTokens:             response.Usage.InputTokens,
+			CompletionTokens:         response.Usage.OutputTokens,
+			TotalTokens:              response.Usage.InputTokens + response.Usage.OutputTokens,
+			CacheCreationInputTokens: response.Usage.CacheCreationInputTokens,
+			CacheReadInputTokens:     response.Usage.CacheReadInputTokens,
+		},
+	}
+
+	p.logger.Debug("Number of content blocks: %d", len(response.Content))
+	p.logger.Debug("Stop reason: %s", response.StopReason)
+
+	var finalResponse strings.Builder
+	var functionCalls []string
+	var pendingText strings.Builder
+	var lastType string
+
+	// First pass: collect all function calls and text
+	for i, content := range response.Content {
+		p.logger.Debug("Processing content block %d: type=%s", i, content.Type)
+
+		switch content.Type {
+		case "text":
+			// If we have pending text and this is also text, add a space
+			if lastType == "text" && pendingText.Len() > 0 {
+				pendingText.WriteString(" ")
+			}
+			pendingText.WriteString(content.Text)
+			p.logger.Debug("Added text content: %s", content.Text)
+
+		case "tool_use", "tool_calls":
+			// If we have any pending text, add it to the final response
+			if pendingText.Len() > 0 {
+				if finalResponse.Len() > 0 {
+					finalResponse.WriteString("\n")
+				}
+				finalResponse.WriteString(pendingText.String())
+				pendingText.Reset()
+			}
+
+			// Parse input as raw JSON to preserve the exact format
+			var args interface{}
+			if err := json.Unmarshal(content.Input, &args); err != nil {
+				p.logger.Debug("Error parsing tool input: %v, raw input: %s", err, string(content.Input))
+				return "", nil, fmt.Errorf("error parsing tool input: %w", err)
+			}
+
+			functionCall, err := utils.FormatFunctionCall(content.Name, args)
+			if err != nil {
+				p.logger.Debug("Error formatting function call: %v", err)
+				return "", nil, fmt.Errorf("error formatting function call: %w", err)
+			}
+			functionCalls = append(functionCalls, functionCall)
+			p.logger.Debug("Added function call: %s", functionCall)
+		}
+		lastType = content.Type
+	}
+
+	// Add any remaining pending text
+	if pendingText.Len() > 0 {
+		if finalResponse.Len() > 0 {
+			finalResponse.WriteString("\n")
+		}
+		finalResponse.WriteString(pendingText.String())
+	}
+
+	p.logger.Debug("Number of function calls collected: %d", len(functionCalls))
+	for i, call := range functionCalls {
+		p.logger.Debug("Function call %d: %s", i, call)
+	}
+
+	// Add all function calls at the end
+	if len(functionCalls) > 0 {
+		if finalResponse.Len() > 0 {
+			finalResponse.WriteString("\n")
+		}
+		finalResponse.WriteString(strings.Join(functionCalls, "\n"))
+	}
+
+	result := finalResponse.String()
+	p.logger.Debug("Final response: %s", result)
+	return result, details, nil
+}
+
 // HandleFunctionCalls processes structured output in the response.
 // This supports Anthropic's response formatting capabilities.
 func (p *AnthropicProvider) HandleFunctionCalls(body []byte) ([]byte, error) {

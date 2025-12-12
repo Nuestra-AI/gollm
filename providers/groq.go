@@ -191,6 +191,55 @@ func (p *GroqProvider) ParseResponse(body []byte) (string, error) {
 	return response.Choices[0].Message.Content, nil
 }
 
+// ParseResponseWithUsage extracts both the generated text and response details from the Groq API response.
+// Groq uses an OpenAI-compatible response format.
+//
+// Parameters:
+//   - body: Raw API response body
+//
+// Returns:
+//   - Generated text content
+//   - Response details (or nil if not available)
+//   - Any error encountered during parsing
+func (p *GroqProvider) ParseResponseWithUsage(body []byte) (string, *types.ResponseDetails, error) {
+	var response struct {
+		ID      string `json:"id"`
+		Model   string `json:"model"`
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
+		} `json:"usage"`
+	}
+
+	err := json.Unmarshal(body, &response)
+	if err != nil {
+		return "", nil, fmt.Errorf("error parsing response: %w", err)
+	}
+
+	if len(response.Choices) == 0 || response.Choices[0].Message.Content == "" {
+		return "", nil, fmt.Errorf("empty response from API")
+	}
+
+	// Extract response details including ID and usage information
+	details := &types.ResponseDetails{
+		ID:    response.ID,
+		Model: response.Model,
+		TokenUsage: types.TokenUsage{
+			PromptTokens:     response.Usage.PromptTokens,
+			CompletionTokens: response.Usage.CompletionTokens,
+			TotalTokens:      response.Usage.TotalTokens,
+		},
+	}
+
+	return response.Choices[0].Message.Content, details, nil
+}
+
 // HandleFunctionCalls processes function calling capabilities.
 // Since Groq doesn't support function calling natively, this returns nil.
 func (p *GroqProvider) HandleFunctionCalls(body []byte) ([]byte, error) {

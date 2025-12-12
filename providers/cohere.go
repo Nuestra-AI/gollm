@@ -248,6 +248,88 @@ func (p *CohereProvider) ParseResponse(body []byte) (string, error) {
 	return finalResponse.String(), nil
 }
 
+// ParseResponseWithUsage extracts both the generated text and response details from the Cohere API response.
+//
+// Parameters:
+//   - body: Raw API response body
+//
+// Returns:
+//   - Generated text content
+//   - Response details (or nil if not available)
+//   - Any error encountered during parsing
+func (p *CohereProvider) ParseResponseWithUsage(body []byte) (string, *types.ResponseDetails, error) {
+	var response struct {
+		ID      string `json:"id"`
+		Message struct {
+			Role    string `json:"role"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+			ToolCalls []struct {
+				ID       string `json:"id"`
+				Type     string `json:"type"`
+				Function struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				} `json:"function"`
+			} `json:"tool_calls"`
+		} `json:"message"`
+		Usage struct {
+			InputTokens  int `json:"input_tokens"`
+			OutputTokens int `json:"output_tokens"`
+		} `json:"usage"`
+	}
+
+	if err := json.Unmarshal(body, &response); err != nil {
+		return "", nil, fmt.Errorf("error parsing response: %w", err)
+	}
+
+	if len(response.Message.Content) == 0 {
+		return "", nil, fmt.Errorf("empty response from API")
+	}
+
+	// Extract response details including ID and normalized usage structure
+	details := &types.ResponseDetails{
+		ID: response.ID,
+		TokenUsage: types.TokenUsage{
+			PromptTokens:     response.Usage.InputTokens,
+			CompletionTokens: response.Usage.OutputTokens,
+			TotalTokens:      response.Usage.InputTokens + response.Usage.OutputTokens,
+		},
+	}
+
+	var finalResponse strings.Builder
+
+	for _, content := range response.Message.Content {
+		switch content.Type {
+		case "text":
+			finalResponse.WriteString(content.Text)
+			p.logger.Debug("Text content: %s", content.Text)
+		}
+	}
+
+	for _, toolCall := range response.Message.ToolCalls {
+		// Parse arguments as raw JSON to preserve the exact format
+		var args interface{}
+		if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &args); err != nil {
+			return "", nil, fmt.Errorf("error parsing function arguments: %w", err)
+		}
+
+		functionCall, err := utils.FormatFunctionCall(toolCall.Function.Name, args)
+		if err != nil {
+			return "", nil, fmt.Errorf("error formatting function call: %w", err)
+		}
+		if finalResponse.Len() > 0 {
+			finalResponse.WriteString("\n")
+		}
+		finalResponse.WriteString(functionCall)
+	}
+
+	p.logger.Debug("Final response: %s", finalResponse.String())
+	return finalResponse.String(), details, nil
+}
+
 // HandleFunctionCalls processes structured output in the response.
 // This supports Cohere's response formatting capabilities.
 func (p *CohereProvider) HandleFunctionCalls(body []byte) ([]byte, error) {

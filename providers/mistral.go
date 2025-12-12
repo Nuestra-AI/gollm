@@ -234,6 +234,82 @@ func (p *MistralProvider) ParseResponse(body []byte) (string, error) {
 	return finalResponse.String(), nil
 }
 
+// ParseResponseWithUsage extracts both the generated text and response details from the Mistral API response.
+// Mistral uses an OpenAI-compatible response format.
+//
+// Parameters:
+//   - body: Raw API response body
+//
+// Returns:
+//   - Generated text content
+//   - Response details (or nil if not available)
+//   - Any error encountered during parsing
+func (p *MistralProvider) ParseResponseWithUsage(body []byte) (string, *types.ResponseDetails, error) {
+	var response struct {
+		ID      string `json:"id"`
+		Model   string `json:"model"`
+		Choices []struct {
+			Message struct {
+				Content   string `json:"content"`
+				ToolCalls []struct {
+					Function struct {
+						Name      string          `json:"name"`
+						Arguments json.RawMessage `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"message"`
+		} `json:"choices"`
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
+		} `json:"usage"`
+	}
+
+	if err := json.Unmarshal(body, &response); err != nil {
+		return "", nil, fmt.Errorf("error parsing response: %w", err)
+	}
+
+	if len(response.Choices) == 0 || response.Choices[0].Message.Content == "" {
+		return "", nil, fmt.Errorf("empty response from API")
+	}
+
+	// Extract response details including ID and usage information
+	details := &types.ResponseDetails{
+		ID:    response.ID,
+		Model: response.Model,
+		TokenUsage: types.TokenUsage{
+			PromptTokens:     response.Usage.PromptTokens,
+			CompletionTokens: response.Usage.CompletionTokens,
+			TotalTokens:      response.Usage.TotalTokens,
+		},
+	}
+
+	// Combine content and tool calls
+	var finalResponse strings.Builder
+	finalResponse.WriteString(response.Choices[0].Message.Content)
+
+	// Process tool calls if present
+	for _, toolCall := range response.Choices[0].Message.ToolCalls {
+		// Parse arguments as raw JSON to preserve the exact format
+		var args interface{}
+		if err := json.Unmarshal(toolCall.Function.Arguments, &args); err != nil {
+			return "", nil, fmt.Errorf("error parsing function arguments: %w", err)
+		}
+
+		functionCall, err := utils.FormatFunctionCall(toolCall.Function.Name, args)
+		if err != nil {
+			return "", nil, fmt.Errorf("error formatting function call: %w", err)
+		}
+		if finalResponse.Len() > 0 {
+			finalResponse.WriteString("\n")
+		}
+		finalResponse.WriteString(functionCall)
+	}
+
+	return finalResponse.String(), details, nil
+}
+
 // HandleFunctionCalls processes structured output in the response.
 // This supports Mistral's response formatting capabilities.
 func (p *MistralProvider) HandleFunctionCalls(body []byte) ([]byte, error) {

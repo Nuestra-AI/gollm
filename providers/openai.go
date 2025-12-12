@@ -519,6 +519,85 @@ func (p *OpenAIProvider) ParseResponse(body []byte) (string, error) {
 	return "", fmt.Errorf("no content or tool calls in response")
 }
 
+// ParseResponseWithUsage extracts both the generated text and response details from the OpenAI API response.
+// It handles provider-specific response formats and normalizes data to a common structure.
+//
+// Parameters:
+//   - body: Raw API response body
+//
+// Returns:
+//   - Generated text content
+//   - Response details (or nil if not available)
+//   - Any error encountered during parsing
+func (p *OpenAIProvider) ParseResponseWithUsage(body []byte) (string, *types.ResponseDetails, error) {
+	var response struct {
+		ID      string `json:"id"`
+		Model   string `json:"model"`
+		Choices []struct {
+			Message struct {
+				Content   string `json:"content"`
+				ToolCalls []struct {
+					ID       string `json:"id"`
+					Type     string `json:"type"`
+					Function struct {
+						Name      string          `json:"name"`
+						Arguments json.RawMessage `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"message"`
+		} `json:"choices"`
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
+		} `json:"usage"`
+	}
+
+	if err := json.Unmarshal(body, &response); err != nil {
+		return "", nil, fmt.Errorf("error parsing response: %w", err)
+	}
+
+	if len(response.Choices) == 0 {
+		return "", nil, fmt.Errorf("empty response from API")
+	}
+
+	// Extract response details including ID and usage information
+	details := &types.ResponseDetails{
+		ID:    response.ID,
+		Model: response.Model,
+		TokenUsage: types.TokenUsage{
+			PromptTokens:     response.Usage.PromptTokens,
+			CompletionTokens: response.Usage.CompletionTokens,
+			TotalTokens:      response.Usage.TotalTokens,
+		},
+	}
+
+	message := response.Choices[0].Message
+	if message.Content != "" {
+		return message.Content, details, nil
+	}
+
+	if len(message.ToolCalls) > 0 {
+		var functionCalls []string
+		for _, call := range message.ToolCalls {
+			// Parse arguments as raw JSON to preserve the exact format
+			var args interface{}
+			if err := json.Unmarshal(call.Function.Arguments, &args); err != nil {
+				return "", nil, fmt.Errorf("error parsing function arguments: %w", err)
+			}
+
+			functionCall, err := utils.FormatFunctionCall(call.Function.Name, args)
+			if err != nil {
+				return "", nil, fmt.Errorf("error formatting function call: %w", err)
+			}
+			functionCalls = append(functionCalls, functionCall)
+		}
+		return strings.Join(functionCalls, "\n"), details, nil
+	}
+
+	return "", nil, fmt.Errorf("no content or tool calls in response")
+}
+
 // HandleFunctionCalls processes function calling in the response.
 // This supports OpenAI's function calling and JSON mode features.
 func (p *OpenAIProvider) HandleFunctionCalls(body []byte) ([]byte, error) {

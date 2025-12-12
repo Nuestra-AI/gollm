@@ -185,6 +185,27 @@ func (p *OllamaProvider) ParseResponse(body []byte) (string, error) {
 	return fullResponse.String(), nil
 }
 
+// ParseResponseWithUsage extracts the generated text from the Ollama API response.
+// Ollama doesn't provide token usage or message IDs, so this returns nil for details.
+//
+// Parameters:
+//   - body: Raw API response body
+//
+// Returns:
+//   - Generated text content
+//   - nil (Ollama doesn't provide response details)
+//   - Any error encountered during parsing
+func (p *OllamaProvider) ParseResponseWithUsage(body []byte) (string, *types.ResponseDetails, error) {
+	// Ollama doesn't provide token usage or message IDs, so we parse the response normally
+	text, err := p.ParseResponse(body)
+	if err != nil {
+		return "", nil, err
+	}
+
+	// Return nil for details since Ollama doesn't provide this information
+	return text, nil, nil
+}
+
 // HandleFunctionCalls processes function calling capabilities.
 // Since Ollama doesn't support function calling natively, this returns nil.
 func (p *OllamaProvider) HandleFunctionCalls(body []byte) ([]byte, error) {
