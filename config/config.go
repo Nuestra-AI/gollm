@@ -148,7 +148,7 @@ func NewConfig() *Config {
 		Provider:     "openai",
 		Model:        "gpt-4o-mini",
 		Temperature:  0.7,
-		MaxTokens:    300,
+		MaxTokens:    1024,
 		Timeout:      30 * time.Second,
 		MaxRetries:   3,
 		RetryDelay:   2 * time.Second,

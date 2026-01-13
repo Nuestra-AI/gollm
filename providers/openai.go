@@ -83,12 +83,36 @@ func (p *OpenAIProvider) needsReasoningEffort() bool {
 }
 
 func (p *OpenAIProvider) needsNoTemperature() bool {
+	return modelNeedsNoTemperature(p.model)
+}
+
+// modelNeedsNoTemperature checks if a given model doesn't support temperature
+func modelNeedsNoTemperature(model string) bool {
 	// Check for models that start with "o3"
-	if strings.HasPrefix(p.model, "o3") {
+	if strings.HasPrefix(model, "o3") {
 		return true
 	}
 
-	if strings.Contains(p.model, "-5") {
+	if strings.Contains(model, "-5") {
+		return true
+	}
+
+	return false
+}
+
+func (p *OpenAIProvider) needsNoToolChoice() bool {
+	return modelNeedsNoToolChoice(p.model)
+}
+
+// modelNeedsNoToolChoice checks if a given model doesn't support tool_choice
+func modelNeedsNoToolChoice(model string) bool {
+	// O-series models (o1, o3, o4) don't support tool_choice
+	if strings.HasPrefix(model, "o1") || strings.HasPrefix(model, "o3") || strings.HasPrefix(model, "o4") {
+		return true
+	}
+
+	// GPT-5 models don't support tool_choice
+	if strings.Contains(model, "-5") {
 		return true
 	}
 
@@ -191,6 +215,12 @@ func (p *OpenAIProvider) Headers() map[string]string {
 //   - System messages
 //   - Function/tool definitions
 //   - Model-specific options
+//   - Web search tool handling (automatically switches to search models and filters tools)
+//
+// Note: When web_search tools are detected, this function:
+//  1. Automatically switches to an appropriate search model variant (e.g., gpt-4o-search-preview)
+//  2. Filters out web_search tools from the tools array (they are NOT passed to the API)
+//  3. Search models have built-in search capabilities and don't accept web_search as a tool type
 //
 // Parameters:
 //   - prompt: The input text or conversation
@@ -219,26 +249,29 @@ func (p *OpenAIProvider) PrepareRequest(prompt string, options map[string]interf
 		"content": prompt,
 	})
 
-	// Handle tool_choice
-	if toolChoice, ok := options["tool_choice"].(string); ok {
-		request["tool_choice"] = toolChoice
-	}
-
 	// Handle tools
 	if tools, ok := options["tools"].([]utils.Tool); ok && len(tools) > 0 {
-		openAITools := make([]map[string]interface{}, len(tools))
-		for i, tool := range tools {
+		// Filter out web_search tools - OpenAI doesn't support them
+		openAITools := []map[string]interface{}{}
+		for _, tool := range tools {
+			// Skip web_search tools - OpenAI doesn't support them
+			if tool.Type == "web_search" {
+				p.logger.Debug("Skipping web_search tool - OpenAI doesn't support web_search")
+				continue
+			}
+
+			// Handle regular function tools
 			if !options["strict_tools"].(bool) {
-				openAITools[i] = map[string]interface{}{
+				openAITools = append(openAITools, map[string]interface{}{
 					"type": "function",
 					"function": map[string]interface{}{
 						"name":        tool.Function.Name,
 						"description": tool.Function.Description,
 						"parameters":  tool.Function.Parameters,
 					},
-				}
+				})
 			} else {
-				openAITools[i] = map[string]interface{}{
+				openAITools = append(openAITools, map[string]interface{}{
 					"type": "function",
 					"function": map[string]interface{}{
 						"name":        tool.Function.Name,
@@ -246,10 +279,19 @@ func (p *OpenAIProvider) PrepareRequest(prompt string, options map[string]interf
 						"parameters":  tool.Function.Parameters,
 					},
 					"strict": true, // Add this if you want strict mode
-				}
+				})
 			}
 		}
-		request["tools"] = openAITools
+
+		// Only add tools to request if we have any non-web_search tools
+		if len(openAITools) > 0 {
+			request["tools"] = openAITools
+
+			// Handle tool_choice (only if model supports it and we have tools)
+			if toolChoice, ok := options["tool_choice"].(string); ok && !p.needsNoToolChoice() {
+				request["tool_choice"] = toolChoice
+			}
+		}
 	}
 
 	// Create a merged copy of options to handle token parameters properly
@@ -291,8 +333,14 @@ func (p *OpenAIProvider) PrepareRequest(prompt string, options map[string]interf
 		delete(mergedOptions, "reasoning_effort")
 	}
 
+	// Remove temperature from mergedOptions if model doesn't support it
 	if p.needsNoTemperature() {
 		delete(mergedOptions, "temperature")
+	}
+
+	// Remove tool_choice from request if model doesn't support it
+	if p.needsNoToolChoice() {
+		delete(request, "tool_choice")
 	}
 
 	// Add merged options to the request
@@ -521,6 +569,7 @@ func (p *OpenAIProvider) ParseResponse(body []byte) (string, error) {
 
 // ParseResponseWithUsage extracts both the generated text and response details from the OpenAI API response.
 // It handles provider-specific response formats and normalizes data to a common structure.
+// For web_search responses, it extracts web_search_call items, annotations, and citations.
 //
 // Parameters:
 //   - body: Raw API response body
@@ -551,14 +600,38 @@ func (p *OpenAIProvider) ParseResponseWithUsage(body []byte) (string, *types.Res
 			CompletionTokens int `json:"completion_tokens"`
 			TotalTokens      int `json:"total_tokens"`
 		} `json:"usage"`
+		// Web search specific fields (from Responses API format)
+		Output []struct {
+			Type   string `json:"type"`
+			ID     string `json:"id,omitempty"`
+			Status string `json:"status,omitempty"`
+			Action *struct {
+				Type    string   `json:"type,omitempty"`
+				Query   string   `json:"query,omitempty"`
+				Domains []string `json:"domains,omitempty"`
+				Sources []struct {
+					URL   string `json:"url"`
+					Title string `json:"title,omitempty"`
+					Type  string `json:"type,omitempty"`
+				} `json:"sources,omitempty"`
+			} `json:"action,omitempty"`
+			Role    string `json:"role,omitempty"`
+			Content []struct {
+				Type        string `json:"type"`
+				Text        string `json:"text,omitempty"`
+				Annotations []struct {
+					Type       string `json:"type"`
+					StartIndex int    `json:"start_index,omitempty"`
+					EndIndex   int    `json:"end_index,omitempty"`
+					URL        string `json:"url,omitempty"`
+					Title      string `json:"title,omitempty"`
+				} `json:"annotations,omitempty"`
+			} `json:"content,omitempty"`
+		} `json:"output,omitempty"`
 	}
 
 	if err := json.Unmarshal(body, &response); err != nil {
 		return "", nil, fmt.Errorf("error parsing response: %w", err)
-	}
-
-	if len(response.Choices) == 0 {
-		return "", nil, fmt.Errorf("empty response from API")
 	}
 
 	// Extract response details including ID and usage information
@@ -570,6 +643,83 @@ func (p *OpenAIProvider) ParseResponseWithUsage(body []byte) (string, *types.Res
 			CompletionTokens: response.Usage.CompletionTokens,
 			TotalTokens:      response.Usage.TotalTokens,
 		},
+	}
+
+	// Check for web search response format (Responses API with output array)
+	if len(response.Output) > 0 {
+		// Convert structured output to interface{} slice for parsing
+		outputInterfaces := make([]interface{}, len(response.Output))
+		for i := range response.Output {
+			item := response.Output[i]
+			itemMap := map[string]interface{}{
+				"type":   item.Type,
+				"id":     item.ID,
+				"status": item.Status,
+			}
+
+			if item.Action != nil {
+				actionMap := map[string]interface{}{
+					"type": item.Action.Type,
+				}
+				if item.Action.Query != "" {
+					actionMap["query"] = item.Action.Query
+				}
+				if len(item.Action.Domains) > 0 {
+					actionMap["domains"] = item.Action.Domains
+				}
+				if len(item.Action.Sources) > 0 {
+					sources := make([]map[string]interface{}, len(item.Action.Sources))
+					for j, src := range item.Action.Sources {
+						sources[j] = map[string]interface{}{
+							"url":   src.URL,
+							"title": src.Title,
+							"type":  src.Type,
+						}
+					}
+					actionMap["sources"] = sources
+				}
+				itemMap["action"] = actionMap
+			}
+
+			if item.Role != "" {
+				itemMap["role"] = item.Role
+			}
+
+			if len(item.Content) > 0 {
+				contentMaps := make([]map[string]interface{}, len(item.Content))
+				for j, c := range item.Content {
+					contentMap := map[string]interface{}{
+						"type": c.Type,
+					}
+					if c.Text != "" {
+						contentMap["text"] = c.Text
+					}
+					if len(c.Annotations) > 0 {
+						annMaps := make([]map[string]interface{}, len(c.Annotations))
+						for k, ann := range c.Annotations {
+							annMaps[k] = map[string]interface{}{
+								"type":        ann.Type,
+								"start_index": ann.StartIndex,
+								"end_index":   ann.EndIndex,
+								"url":         ann.URL,
+								"title":       ann.Title,
+							}
+						}
+						contentMap["annotations"] = annMaps
+					}
+					contentMaps[j] = contentMap
+				}
+				itemMap["content"] = contentMaps
+			}
+
+			outputInterfaces[i] = itemMap
+		}
+		return p.parseWebSearchResponse(outputInterfaces, details)
+	}
+
+	// Standard Chat Completions API format
+	if len(response.Choices) == 0 {
+		return "", nil, fmt.Errorf("empty response from API")
 	}
 
 	message := response.Choices[0].Message
@@ -596,6 +746,130 @@ func (p *OpenAIProvider) ParseResponseWithUsage(body []byte) (string, *types.Res
 	}
 
 	return "", nil, fmt.Errorf("no content or tool calls in response")
+}
+
+// parseWebSearchResponse handles the Responses API format which includes web_search_call items.
+func (p *OpenAIProvider) parseWebSearchResponse(output []interface{}, details *types.ResponseDetails) (string, *types.ResponseDetails, error) {
+	var webSearchCalls []types.WebSearchCall
+	var annotations []types.Annotation
+	var citations []types.URLCitation
+	var content strings.Builder
+
+	for _, item := range output {
+		itemMap, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		itemType, _ := itemMap["type"].(string)
+
+		switch itemType {
+		case "web_search_call":
+			// Extract web search call
+			call := types.WebSearchCall{
+				ID:     itemMap["id"].(string),
+				Type:   itemType,
+				Status: itemMap["status"].(string),
+			}
+
+			if actionData, ok := itemMap["action"].(map[string]interface{}); ok {
+				action := &types.WebSearchAction{
+					Type: actionData["type"].(string),
+				}
+
+				if query, ok := actionData["query"].(string); ok {
+					action.Query = query
+				}
+
+				if domains, ok := actionData["domains"].([]interface{}); ok {
+					for _, d := range domains {
+						if domain, ok := d.(string); ok {
+							action.Domains = append(action.Domains, domain)
+						}
+					}
+				}
+
+				if sources, ok := actionData["sources"].([]interface{}); ok {
+					for _, s := range sources {
+						if srcMap, ok := s.(map[string]interface{}); ok {
+							source := types.Source{
+								URL: srcMap["url"].(string),
+							}
+							if title, ok := srcMap["title"].(string); ok {
+								source.Title = title
+							}
+							if srcType, ok := srcMap["type"].(string); ok {
+								source.Type = srcType
+							}
+							action.Sources = append(action.Sources, source)
+						}
+					}
+				}
+
+				call.Action = action
+			}
+
+			webSearchCalls = append(webSearchCalls, call)
+
+		case "message":
+			// Extract message content and annotations
+			if contentArray, ok := itemMap["content"].([]interface{}); ok {
+				for _, c := range contentArray {
+					if contentItem, ok := c.(map[string]interface{}); ok {
+						if text, ok := contentItem["text"].(string); ok {
+							content.WriteString(text)
+						}
+
+						if annArray, ok := contentItem["annotations"].([]interface{}); ok {
+							for _, a := range annArray {
+								if annMap, ok := a.(map[string]interface{}); ok {
+									ann := types.Annotation{
+										Type: annMap["type"].(string),
+									}
+
+									if startIdx, ok := annMap["start_index"].(float64); ok {
+										ann.StartIndex = int(startIdx)
+									}
+									if endIdx, ok := annMap["end_index"].(float64); ok {
+										ann.EndIndex = int(endIdx)
+									}
+									if url, ok := annMap["url"].(string); ok {
+										ann.URL = url
+									}
+									if title, ok := annMap["title"].(string); ok {
+										ann.Title = title
+									}
+
+									annotations = append(annotations, ann)
+
+									// Also add to citations for convenience
+									if ann.Type == "url_citation" {
+										citations = append(citations, types.URLCitation{
+											Type:       ann.Type,
+											StartIndex: ann.StartIndex,
+											EndIndex:   ann.EndIndex,
+											URL:        ann.URL,
+											Title:      ann.Title,
+										})
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Store web search specific data in metadata
+	if details.Metadata == nil {
+		details.Metadata = make(map[string]interface{})
+	}
+	details.Metadata["web_search_calls"] = webSearchCalls
+	details.Metadata["annotations"] = annotations
+	details.Metadata["citations"] = citations
+
+	return content.String(), details, nil
 }
 
 // HandleFunctionCalls processes function calling in the response.
@@ -775,26 +1049,29 @@ func (p *OpenAIProvider) PrepareRequestWithMessages(messages []types.MemoryMessa
 		request["messages"] = append(request["messages"].([]map[string]interface{}), message)
 	}
 
-	// Handle tool_choice
-	if toolChoice, ok := options["tool_choice"].(string); ok {
-		request["tool_choice"] = toolChoice
-	}
-
 	// Handle tools
 	if tools, ok := options["tools"].([]utils.Tool); ok && len(tools) > 0 {
-		openAITools := make([]map[string]interface{}, len(tools))
-		for i, tool := range tools {
+		// Filter out web_search tools - OpenAI doesn't support them
+		openAITools := []map[string]interface{}{}
+		for _, tool := range tools {
+			// Skip web_search tools - OpenAI doesn't support them
+			if tool.Type == "web_search" {
+				p.logger.Debug("Skipping web_search tool - OpenAI doesn't support web_search")
+				continue
+			}
+
+			// Handle regular function tools
 			if !options["strict_tools"].(bool) {
-				openAITools[i] = map[string]interface{}{
+				openAITools = append(openAITools, map[string]interface{}{
 					"type": "function",
 					"function": map[string]interface{}{
 						"name":        tool.Function.Name,
 						"description": tool.Function.Description,
 						"parameters":  tool.Function.Parameters,
 					},
-				}
+				})
 			} else {
-				openAITools[i] = map[string]interface{}{
+				openAITools = append(openAITools, map[string]interface{}{
 					"type": "function",
 					"function": map[string]interface{}{
 						"name":        tool.Function.Name,
@@ -802,10 +1079,19 @@ func (p *OpenAIProvider) PrepareRequestWithMessages(messages []types.MemoryMessa
 						"parameters":  tool.Function.Parameters,
 					},
 					"strict": true, // Add this if you want strict mode
-				}
+				})
 			}
 		}
-		request["tools"] = openAITools
+
+		// Only add tools to request if we have any non-web_search tools
+		if len(openAITools) > 0 {
+			request["tools"] = openAITools
+
+			// Handle tool_choice (only if model supports it and we have tools)
+			if toolChoice, ok := options["tool_choice"].(string); ok && !p.needsNoToolChoice() {
+				request["tool_choice"] = toolChoice
+			}
+		}
 	}
 
 	// Create a merged copy of options to handle token parameters properly
@@ -847,8 +1133,14 @@ func (p *OpenAIProvider) PrepareRequestWithMessages(messages []types.MemoryMessa
 		delete(mergedOptions, "reasoning_effort")
 	}
 
+	// Remove temperature from mergedOptions if model doesn't support it
 	if p.needsNoTemperature() {
 		delete(mergedOptions, "temperature")
+	}
+
+	// Remove tool_choice from request if model doesn't support it
+	if p.needsNoToolChoice() {
+		delete(request, "tool_choice")
 	}
 
 	// Add merged options to the request

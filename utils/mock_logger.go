@@ -12,6 +12,10 @@ func (m *MockLogger) Debug(msg string, keysAndValues ...interface{}) {
 	m.Called(msg, keysAndValues)
 }
 
+func (m *MockLogger) Wire(msg string, keysAndValues ...interface{}) {
+	m.Called(msg, keysAndValues)
+}
+
 func (m *MockLogger) Info(msg string, keysAndValues ...interface{}) {
 	m.Called(msg, keysAndValues)
 }

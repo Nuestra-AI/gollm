@@ -148,10 +148,58 @@ func (p *AnthropicProvider) PrepareRequest(prompt string, options map[string]int
 	if tools, ok := options["tools"].([]utils.Tool); ok && len(tools) > 0 {
 		anthropicTools := make([]map[string]interface{}, len(tools))
 		for i, tool := range tools {
-			anthropicTools[i] = map[string]interface{}{
-				"name":         tool.Function.Name,
-				"description":  tool.Function.Description,
-				"input_schema": tool.Function.Parameters,
+			// Handle web_search as a special built-in tool
+			if tool.Type == "web_search" {
+				webSearchTool := map[string]interface{}{
+					"type": "web_search_20250305",
+					"name": "web_search",
+				}
+
+				// Add max_uses if provided
+				if maxUses, ok := tool.MaxUses.(int); ok && maxUses > 0 {
+					webSearchTool["max_uses"] = maxUses
+				}
+
+				// Add allowed_domains from Filters or AllowedDomains
+				var allowedDomains []string
+				if tool.AllowedDomains != nil {
+					if domains, ok := tool.AllowedDomains.([]string); ok {
+						allowedDomains = domains
+					}
+				} else if tool.Filters != nil {
+					if filters, ok := tool.Filters.(map[string]interface{}); ok {
+						if domains, ok := filters["allowed_domains"].([]string); ok {
+							allowedDomains = domains
+						}
+					}
+				}
+				if len(allowedDomains) > 0 {
+					webSearchTool["allowed_domains"] = allowedDomains
+				}
+
+				// Add blocked_domains if provided (mutually exclusive with allowed_domains)
+				if tool.BlockedDomains != nil {
+					if domains, ok := tool.BlockedDomains.([]string); ok && len(domains) > 0 {
+						// Only add blocked_domains if allowed_domains wasn't set
+						if len(allowedDomains) == 0 {
+							webSearchTool["blocked_domains"] = domains
+						}
+					}
+				}
+
+				// Add user_location if provided
+				if userLoc, ok := tool.UserLocation.(map[string]interface{}); ok {
+					webSearchTool["user_location"] = userLoc
+				}
+
+				anthropicTools[i] = webSearchTool
+			} else {
+				// Handle regular function tools
+				anthropicTools[i] = map[string]interface{}{
+					"name":         tool.Function.Name,
+					"description":  tool.Function.Description,
+					"input_schema": tool.Function.Parameters,
+				}
 			}
 		}
 		requestBody["tools"] = anthropicTools
@@ -214,7 +262,7 @@ func (p *AnthropicProvider) PrepareRequest(prompt string, options map[string]int
 
 	// Add other options
 	for k, v := range options {
-		if k != "system_prompt" && k != "max_tokens" && k != "tools" && k != "tool_choice" && k != "enable_caching" {
+		if k != "system_prompt" && k != "max_tokens" && k != "tools" && k != "tool_choice" && k != "enable_caching" && k != "reasoning_effort" && k != "strict_tools" {
 			requestBody[k] = v
 		}
 	}
@@ -283,7 +331,7 @@ func (p *AnthropicProvider) PrepareRequestWithSchema(prompt string, options map[
 
 	// Add any additional options
 	for k, v := range options {
-		if k != "system_prompt" { // Skip system_prompt as we're using it for schema
+		if k != "system_prompt" && k != "reasoning_effort" && k != "strict_tools" { // Skip system_prompt as we're using it for schema, skip OpenAI-specific params
 			requestBody[k] = v
 		}
 	}
@@ -425,11 +473,20 @@ func (p *AnthropicProvider) ParseResponseWithUsage(body []byte) (string, *types.
 		Role    string `json:"role"`
 		Model   string `json:"model"`
 		Content []struct {
-			Type  string          `json:"type"`
-			Text  string          `json:"text,omitempty"`
-			ID    string          `json:"id,omitempty"`
-			Name  string          `json:"name,omitempty"`
-			Input json.RawMessage `json:"input,omitempty"`
+			Type      string          `json:"type"`
+			Text      string          `json:"text,omitempty"`
+			ID        string          `json:"id,omitempty"`
+			Name      string          `json:"name,omitempty"`
+			Input     json.RawMessage `json:"input,omitempty"`
+			ToolUseID string          `json:"tool_use_id,omitempty"` // For web_search_tool_result
+			Content   json.RawMessage `json:"content,omitempty"`     // For web_search_tool_result content
+			Citations []struct {
+				Type           string `json:"type"`
+				URL            string `json:"url"`
+				Title          string `json:"title"`
+				EncryptedIndex string `json:"encrypted_index"`
+				CitedText      string `json:"cited_text"`
+			} `json:"citations,omitempty"` // For text blocks with citations
 		} `json:"content"`
 		StopReason string  `json:"stop_reason"`
 		StopSeq    *string `json:"stop_sequence"`
@@ -438,6 +495,9 @@ func (p *AnthropicProvider) ParseResponseWithUsage(body []byte) (string, *types.
 			CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 			CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 			OutputTokens             int `json:"output_tokens"`
+			ServerToolUse            *struct {
+				WebSearchRequests int `json:"web_search_requests"`
+			} `json:"server_tool_use,omitempty"` // For web search usage tracking
 		} `json:"usage"`
 	}
 
@@ -462,6 +522,16 @@ func (p *AnthropicProvider) ParseResponseWithUsage(body []byte) (string, *types.
 		},
 	}
 
+	// Initialize metadata for web search data
+	if details.Metadata == nil {
+		details.Metadata = make(map[string]interface{})
+	}
+
+	// Add web search usage if present
+	if response.Usage.ServerToolUse != nil && response.Usage.ServerToolUse.WebSearchRequests > 0 {
+		details.Metadata["web_search_requests"] = response.Usage.ServerToolUse.WebSearchRequests
+	}
+
 	p.logger.Debug("Number of content blocks: %d", len(response.Content))
 	p.logger.Debug("Stop reason: %s", response.StopReason)
 
@@ -470,7 +540,12 @@ func (p *AnthropicProvider) ParseResponseWithUsage(body []byte) (string, *types.
 	var pendingText strings.Builder
 	var lastType string
 
-	// First pass: collect all function calls and text
+	// Collect web search specific data
+	var serverToolUses []types.AnthropicServerToolUse
+	var webSearchResults []types.AnthropicWebSearchResult
+	var citations []types.AnthropicWebSearchResultLocation
+
+	// First pass: collect all function calls, text, and web search data
 	for i, content := range response.Content {
 		p.logger.Debug("Processing content block %d: type=%s", i, content.Type)
 
@@ -482,6 +557,48 @@ func (p *AnthropicProvider) ParseResponseWithUsage(body []byte) (string, *types.
 			}
 			pendingText.WriteString(content.Text)
 			p.logger.Debug("Added text content: %s", content.Text)
+
+			// Extract citations if present
+			if len(content.Citations) > 0 {
+				for _, cit := range content.Citations {
+					citations = append(citations, types.AnthropicWebSearchResultLocation{
+						Type:           cit.Type,
+						URL:            cit.URL,
+						Title:          cit.Title,
+						EncryptedIndex: cit.EncryptedIndex,
+						CitedText:      cit.CitedText,
+					})
+				}
+			}
+
+		case "server_tool_use":
+			// Handle web search tool invocations
+			var input map[string]interface{}
+			if len(content.Input) > 0 {
+				if err := json.Unmarshal(content.Input, &input); err != nil {
+					p.logger.Debug("Error parsing server_tool_use input: %v", err)
+				}
+			}
+
+			serverToolUses = append(serverToolUses, types.AnthropicServerToolUse{
+				Type:  content.Type,
+				ID:    content.ID,
+				Name:  content.Name,
+				Input: input,
+			})
+			p.logger.Debug("Added server_tool_use: %s (id: %s)", content.Name, content.ID)
+
+		case "web_search_tool_result":
+			// Handle web search results
+			if len(content.Content) > 0 {
+				var resultContent []types.AnthropicWebSearchResult
+				if err := json.Unmarshal(content.Content, &resultContent); err != nil {
+					p.logger.Debug("Error parsing web_search_tool_result content: %v", err)
+				} else {
+					webSearchResults = append(webSearchResults, resultContent...)
+				}
+			}
+			p.logger.Debug("Added web_search_tool_result for tool_use_id: %s", content.ToolUseID)
 
 		case "tool_use", "tool_calls":
 			// If we have any pending text, add it to the final response
@@ -509,6 +626,17 @@ func (p *AnthropicProvider) ParseResponseWithUsage(body []byte) (string, *types.
 			p.logger.Debug("Added function call: %s", functionCall)
 		}
 		lastType = content.Type
+	}
+
+	// Store web search data in metadata
+	if len(serverToolUses) > 0 {
+		details.Metadata["server_tool_uses"] = serverToolUses
+	}
+	if len(webSearchResults) > 0 {
+		details.Metadata["web_search_results"] = webSearchResults
+	}
+	if len(citations) > 0 {
+		details.Metadata["citations"] = citations
 	}
 
 	// Add any remaining pending text
@@ -602,7 +730,7 @@ func (p *AnthropicProvider) PrepareStreamRequest(prompt string, options map[stri
 
 	// Add other options
 	for k, v := range options {
-		if k != "stream" { // Don't override stream setting
+		if k != "stream" && k != "reasoning_effort" && k != "strict_tools" { // Don't override stream setting, skip OpenAI-specific params
 			requestBody[k] = v
 		}
 	}
@@ -697,10 +825,58 @@ func (p *AnthropicProvider) PrepareRequestWithMessages(messages []types.MemoryMe
 	if tools, ok := options["tools"].([]utils.Tool); ok && len(tools) > 0 {
 		anthropicTools := make([]map[string]interface{}, len(tools))
 		for i, tool := range tools {
-			anthropicTools[i] = map[string]interface{}{
-				"name":         tool.Function.Name,
-				"description":  tool.Function.Description,
-				"input_schema": tool.Function.Parameters,
+			// Handle web_search as a special built-in tool
+			if tool.Type == "web_search" {
+				webSearchTool := map[string]interface{}{
+					"type": "web_search_20250305",
+					"name": "web_search",
+				}
+
+				// Add max_uses if provided
+				if maxUses, ok := tool.MaxUses.(int); ok && maxUses > 0 {
+					webSearchTool["max_uses"] = maxUses
+				}
+
+				// Add allowed_domains from Filters or AllowedDomains
+				var allowedDomains []string
+				if tool.AllowedDomains != nil {
+					if domains, ok := tool.AllowedDomains.([]string); ok {
+						allowedDomains = domains
+					}
+				} else if tool.Filters != nil {
+					if filters, ok := tool.Filters.(map[string]interface{}); ok {
+						if domains, ok := filters["allowed_domains"].([]string); ok {
+							allowedDomains = domains
+						}
+					}
+				}
+				if len(allowedDomains) > 0 {
+					webSearchTool["allowed_domains"] = allowedDomains
+				}
+
+				// Add blocked_domains if provided (mutually exclusive with allowed_domains)
+				if tool.BlockedDomains != nil {
+					if domains, ok := tool.BlockedDomains.([]string); ok && len(domains) > 0 {
+						// Only add blocked_domains if allowed_domains wasn't set
+						if len(allowedDomains) == 0 {
+							webSearchTool["blocked_domains"] = domains
+						}
+					}
+				}
+
+				// Add user_location if provided
+				if userLoc, ok := tool.UserLocation.(map[string]interface{}); ok {
+					webSearchTool["user_location"] = userLoc
+				}
+
+				anthropicTools[i] = webSearchTool
+			} else {
+				// Handle regular function tools
+				anthropicTools[i] = map[string]interface{}{
+					"name":         tool.Function.Name,
+					"description":  tool.Function.Description,
+					"input_schema": tool.Function.Parameters,
+				}
 			}
 		}
 		requestBody["tools"] = anthropicTools
@@ -756,7 +932,7 @@ func (p *AnthropicProvider) PrepareRequestWithMessages(messages []types.MemoryMe
 
 	// Add other options
 	for k, v := range options {
-		if k != "system_prompt" && k != "max_tokens" && k != "tools" && k != "tool_choice" && k != "enable_caching" && k != "structured_messages" {
+		if k != "system_prompt" && k != "max_tokens" && k != "tools" && k != "tool_choice" && k != "enable_caching" && k != "structured_messages" && k != "reasoning_effort" && k != "strict_tools" {
 			requestBody[k] = v
 		}
 	}
