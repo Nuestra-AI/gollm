@@ -114,9 +114,6 @@ var (
 	// Validation configuration
 	SetCustomValidator = config.SetCustomValidator // Sets a custom validation function to override default validation
 
-	// Logging
-	SetLogger = config.SetLogger // Sets a custom logger implementation
-
 	// Configuration creation
 	NewConfig = config.NewConfig // Creates a new Config with default values
 

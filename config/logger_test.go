@@ -29,6 +29,10 @@ func (l *testLogger) Error(msg string, keysAndValues ...interface{}) {
 	l.messages = append(l.messages, "ERROR: "+msg)
 }
 
+func (l *testLogger) Wire(msg string, keysAndValues ...interface{}) {
+	l.messages = append(l.messages, "WIRE: "+msg)
+}
+
 func (l *testLogger) SetLevel(level utils.LogLevel) {}
 
 // TestSetLogger verifies that a custom logger can be set via config option.

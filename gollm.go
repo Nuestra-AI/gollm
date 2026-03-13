@@ -286,22 +286,12 @@ func NewLLM(opts ...ConfigOption) (LLM, error) {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
 	}
 
-<<<<<<< HEAD
-	// Use custom logger if provided, otherwise create default
-	var logger utils.Logger
-	if cfg.Logger != nil {
-		logger = cfg.Logger
-		logger.SetLevel(cfg.LogLevel)
-	} else {
-		logger = utils.NewLogger(cfg.LogLevel)
-=======
 	var logger utils.Logger
 	if cfg.Logger == nil {
 		logger = utils.NewLogger(cfg.LogLevel)
 	} else {
 		logger = cfg.Logger
 		logger.SetLevel(cfg.LogLevel)
->>>>>>> 359780f (Added custom logger)
 	}
 
 	if cfg.Provider == "anthropic" && cfg.EnableCaching {

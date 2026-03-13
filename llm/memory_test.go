@@ -114,7 +114,13 @@ func (l *MockLLM) SetLogLevel(level utils.LogLevel) {}
 func (l *MockLLM) SetEndpoint(endpoint string)      {}
 func (l *MockLLM) NewPrompt(input string) *Prompt   { return &Prompt{Input: input} }
 func (l *MockLLM) GetLogger() utils.Logger          { return l.logger }
-func (l *MockLLM) SupportsJSONSchema() bool         { return false }
+func (l *MockLLM) SupportsJSONSchema() bool { return false }
+func (l *MockLLM) GenerateWithUsage(ctx context.Context, prompt *Prompt, opts ...GenerateOption) (string, *types.ResponseDetails, error) {
+	return "mock response", nil, nil
+}
+func (l *MockLLM) GenerateWithSchemaAndUsage(ctx context.Context, prompt *Prompt, schema interface{}, opts ...GenerateOption) (string, *types.ResponseDetails, error) {
+	return "mock response", nil, nil
+}
 
 // TestStructuredMessageStorage tests that structured messages are properly stored
 func TestStructuredMessageStorage(t *testing.T) {

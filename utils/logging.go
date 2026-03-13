@@ -101,6 +101,7 @@ func NewNopLogger() Logger {
 }
 
 func (l *NopLogger) Debug(msg string, keysAndValues ...interface{}) {}
+func (l *NopLogger) Wire(msg string, keysAndValues ...interface{})  {}
 func (l *NopLogger) Info(msg string, keysAndValues ...interface{})  {}
 func (l *NopLogger) Warn(msg string, keysAndValues ...interface{})  {}
 func (l *NopLogger) Error(msg string, keysAndValues ...interface{}) {}

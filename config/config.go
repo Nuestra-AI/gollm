@@ -81,7 +81,6 @@ type Config struct {
 	EnableStreaming       bool `env:"LLM_ENABLE_STREAMING" envDefault:"false"`
 	MemoryOption          *MemoryOption
 	CustomValidator       func(interface{}) error // Custom validation function to override default validation
-	Logger                utils.Logger            // Custom logger, if nil uses default
 }
 
 // LoadConfig creates a new Config instance, loading values from environment
@@ -408,14 +407,6 @@ func SetCustomValidator(fn func(interface{}) error) ConfigOption {
 	}
 }
 
-// SetLogger sets a custom logger implementation.
-// If not set, a default logger writing to stderr is used.
-// Pass nil to disable logging entirely.
-func SetLogger(logger utils.Logger) ConfigOption {
-	return func(c *Config) {
-		c.Logger = logger
-	}
-}
 
 // ApplyOptions applies a series of ConfigOption functions to a Config instance.
 // This enables fluent configuration updates using the builder pattern.

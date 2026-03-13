@@ -249,6 +249,44 @@ func (p *VLLMProvider) ParseResponse(body []byte) (string, error) {
 	return response.Choices[0].Message.Content, nil
 }
 
+// ParseResponseWithUsage extracts both the generated text and response details from the vLLM API response.
+func (p *VLLMProvider) ParseResponseWithUsage(body []byte) (string, *types.ResponseDetails, error) {
+	var response struct {
+		ID      string `json:"id"`
+		Model   string `json:"model"`
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
+		} `json:"usage"`
+	}
+
+	if err := json.Unmarshal(body, &response); err != nil {
+		return "", nil, err
+	}
+
+	details := &types.ResponseDetails{
+		ID:    response.ID,
+		Model: response.Model,
+		TokenUsage: types.TokenUsage{
+			PromptTokens:     response.Usage.PromptTokens,
+			CompletionTokens: response.Usage.CompletionTokens,
+			TotalTokens:      response.Usage.TotalTokens,
+		},
+	}
+
+	if len(response.Choices) == 0 {
+		return "", details, fmt.Errorf("empty response from API")
+	}
+
+	return response.Choices[0].Message.Content, details, nil
+}
+
 // HandleFunctionCalls processes function calling in the response.
 func (p *VLLMProvider) HandleFunctionCalls(body []byte) ([]byte, error) {
 	// vLLM may support function calling depending on the model

@@ -324,6 +324,15 @@ func (p *BedrockProvider) PrepareRequestWithSchema(prompt string, options map[st
 }
 
 // ParseResponse extracts the generated text from the Bedrock API response.
+// ParseResponseWithUsage extracts both the generated text and response details from the Bedrock API response.
+func (p *BedrockProvider) ParseResponseWithUsage(body []byte) (string, *types.ResponseDetails, error) {
+	content, err := p.ParseResponse(body)
+	if err != nil {
+		return "", nil, err
+	}
+	return content, nil, nil
+}
+
 func (p *BedrockProvider) ParseResponse(body []byte) (string, error) {
 	family := p.getModelFamily()
 
