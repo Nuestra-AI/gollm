@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -313,7 +314,7 @@ func (l *LLMImpl) attemptGenerate(ctx context.Context, prompt *Prompt) (string, 
 	l.logger.Wire("Full API response", "body", string(body))
 
 	if resp.StatusCode != http.StatusOK {
-		l.logger.Error("API error", "provider", l.Provider.Name(), "status", resp.StatusCode, "body", string(body))
+		l.logger.Warn("API error", "provider", l.Provider.Name(), slog.Int("status", resp.StatusCode), "body", string(body))
 		return "", NewLLMError(ErrorTypeAPI, fmt.Sprintf("API error: status code %d", resp.StatusCode), nil)
 	}
 
@@ -556,7 +557,7 @@ func (l *LLMImpl) attemptGenerateWithUsage(ctx context.Context, prompt *Prompt) 
 	l.logger.Wire("Full API response", "body", string(body))
 
 	if resp.StatusCode != http.StatusOK {
-		l.logger.Error("API error", "provider", l.Provider.Name(), "status", resp.StatusCode, "body", string(body))
+		l.logger.Warn("API error", "provider", l.Provider.Name(), slog.Int("status", resp.StatusCode), "body", string(body))
 		return "", nil, NewLLMError(ErrorTypeAPI, fmt.Sprintf("API error: status code %d", resp.StatusCode), nil)
 	}
 
@@ -638,7 +639,7 @@ func (l *LLMImpl) attemptGenerateWithSchemaAndUsage(ctx context.Context, prompt 
 	l.logger.Wire("Full API response", "body", string(body))
 
 	if resp.StatusCode != http.StatusOK {
-		l.logger.Error("API error", "provider", l.Provider.Name(), "status", resp.StatusCode, "body", string(body))
+		l.logger.Warn("API error", "provider", l.Provider.Name(), slog.Int("status", resp.StatusCode), "body", string(body))
 		return "", nil, fullPrompt, NewLLMError(ErrorTypeAPI, fmt.Sprintf("API error: status code %d", resp.StatusCode), nil)
 	}
 
@@ -726,7 +727,7 @@ func (l *LLMImpl) attemptGenerateWithSchema(ctx context.Context, prompt string, 
 	l.logger.Wire("Full API response", "body", string(body))
 
 	if resp.StatusCode != http.StatusOK {
-		l.logger.Error("API error", "provider", l.Provider.Name(), "status", resp.StatusCode, "body", string(body))
+		l.logger.Warn("API error", "provider", l.Provider.Name(), slog.Int("status", resp.StatusCode), "body", string(body))
 		return "", fullPrompt, NewLLMError(ErrorTypeAPI, fmt.Sprintf("API error: status code %d", resp.StatusCode), nil)
 	}
 
