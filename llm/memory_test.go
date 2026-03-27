@@ -47,6 +47,11 @@ func (p *MockProvider) PrepareRequestWithMessages(messages []types.MemoryMessage
 func (p *MockProvider) PrepareRequestWithSchema(prompt string, options map[string]interface{}, schema interface{}) ([]byte, error) {
 	return []byte(`{}`), nil
 }
+func (p *MockProvider) PrepareRequestWithMessagesAndSchema(messages []types.MemoryMessage, options map[string]interface{}, schema interface{}) ([]byte, error) {
+	p.messages = messages
+	p.structured = true
+	return []byte(`{"messages":"structured","schema":"present"}`), nil
+}
 func (p *MockProvider) ParseResponse(body []byte) (string, error)       { return "mock response", nil }
 func (p *MockProvider) SetExtraHeaders(extraHeaders map[string]string)  {}
 func (p *MockProvider) HandleFunctionCalls(body []byte) ([]byte, error) { return nil, nil }

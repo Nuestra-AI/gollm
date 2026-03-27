@@ -137,6 +137,11 @@ func (p *GroqProvider) PrepareRequest(prompt string, options map[string]interfac
 // Since Groq doesn't support schema validation natively, this falls back to
 // standard request preparation.
 func (p *GroqProvider) PrepareRequestWithSchema(prompt string, options map[string]interface{}, schema interface{}) ([]byte, error) {
+	schemaObj, err := normalizeSchema(schema)
+	if err != nil {
+		return nil, fmt.Errorf("failed to normalize schema: %w", err)
+	}
+
 	requestBody := map[string]interface{}{
 		"model": p.model,
 		"messages": []map[string]string{
@@ -144,7 +149,7 @@ func (p *GroqProvider) PrepareRequestWithSchema(prompt string, options map[strin
 		},
 		"response_format": map[string]interface{}{
 			"type":   "json_schema",
-			"schema": schema,
+			"schema": schemaObj,
 		},
 	}
 
@@ -328,4 +333,22 @@ func (p *GroqProvider) PrepareRequestWithMessages(messages []types.MemoryMessage
 	}
 
 	return json.Marshal(request)
+}
+
+// PrepareRequestWithMessagesAndSchema combines message-based requests with JSON schema validation.
+func (p *GroqProvider) PrepareRequestWithMessagesAndSchema(messages []types.MemoryMessage, options map[string]interface{}, schema interface{}) ([]byte, error) {
+	responseFormat := map[string]interface{}{
+		"type":   "json_schema",
+		"schema": schema,
+	}
+	if strict, ok := options["strict"].(bool); ok && strict {
+		responseFormat["strict"] = true
+	}
+
+	newOptions := make(map[string]interface{}, len(options)+1)
+	for k, v := range options {
+		newOptions[k] = v
+	}
+	newOptions["response_format"] = responseFormat
+	return p.PrepareRequestWithMessages(messages, newOptions)
 }

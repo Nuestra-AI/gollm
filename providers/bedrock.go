@@ -314,7 +314,11 @@ func (p *BedrockProvider) prepareGenericRequest(prompt string, options map[strin
 
 // PrepareRequestWithSchema creates a request that includes JSON schema validation.
 func (p *BedrockProvider) PrepareRequestWithSchema(prompt string, options map[string]interface{}, schema interface{}) ([]byte, error) {
-	schemaJSON, err := json.MarshalIndent(schema, "", "  ")
+	schemaObj, err := normalizeSchema(schema)
+	if err != nil {
+		return nil, fmt.Errorf("failed to normalize schema: %w", err)
+	}
+	schemaJSON, err := json.Marshal(schemaObj)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal schema: %w", err)
 	}
@@ -504,6 +508,47 @@ func (p *BedrockProvider) PrepareRequestWithMessages(messages []types.MemoryMess
 		promptBuilder.WriteString(fmt.Sprintf("%s: %s\n", msg.Role, msg.Content))
 	}
 	return p.PrepareRequest(promptBuilder.String(), options)
+}
+
+// PrepareRequestWithMessagesAndSchema creates a request body using structured message objects
+// and a JSON schema for response validation. The schema is injected into the system prompt
+// since Bedrock does not natively support structured output schemas.
+//
+// Parameters:
+//   - messages: Slice of MemoryMessage objects representing the conversation
+//   - options: Additional options for the request
+//   - schema: JSON schema for response validation
+//
+// Returns:
+//   - Serialized JSON request body
+//   - Any error encountered during preparation
+func (p *BedrockProvider) PrepareRequestWithMessagesAndSchema(messages []types.MemoryMessage, options map[string]interface{}, schema interface{}) ([]byte, error) {
+	schemaJSON, err := json.Marshal(schema)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal schema: %w", err)
+	}
+
+	schemaInstruction := fmt.Sprintf("You must respond with a JSON object that strictly adheres to this schema:\n%s\nDo not include any explanatory text, only output valid JSON.", string(schemaJSON))
+
+	// Build combined system prompt: user prompt first, then schema instruction
+	sp := ""
+	if existing, ok := options["system_prompt"].(string); ok && existing != "" {
+		sp = existing
+	}
+
+	combinedSystemPrompt := schemaInstruction
+	if sp != "" {
+		combinedSystemPrompt = sp + "\n\n" + schemaInstruction
+	}
+
+	// Copy options to avoid mutating the caller's map
+	newOptions := make(map[string]interface{}, len(options))
+	for k, v := range options {
+		newOptions[k] = v
+	}
+	newOptions["system_prompt"] = combinedSystemPrompt
+
+	return p.PrepareRequestWithMessages(messages, newOptions)
 }
 
 func (p *BedrockProvider) prepareAnthropicMessagesRequest(messages []types.MemoryMessage, options map[string]interface{}) ([]byte, error) {

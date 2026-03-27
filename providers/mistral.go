@@ -153,6 +153,11 @@ func (p *MistralProvider) PrepareRequest(prompt string, options map[string]inter
 //   - Serialized JSON request body
 //   - Any error encountered during preparation
 func (p *MistralProvider) PrepareRequestWithSchema(prompt string, options map[string]interface{}, schema interface{}) ([]byte, error) {
+	schemaObj, err := normalizeSchema(schema)
+	if err != nil {
+		return nil, fmt.Errorf("failed to normalize schema: %w", err)
+	}
+
 	requestBody := map[string]interface{}{
 		"model": p.model,
 		"messages": []map[string]string{
@@ -160,7 +165,7 @@ func (p *MistralProvider) PrepareRequestWithSchema(prompt string, options map[st
 		},
 		"response_format": map[string]interface{}{
 			"type":   "json_schema",
-			"schema": schema,
+			"schema": schemaObj,
 		},
 	}
 
@@ -397,4 +402,22 @@ func (p *MistralProvider) PrepareRequestWithMessages(messages []types.MemoryMess
 	}
 
 	return json.Marshal(request)
+}
+
+// PrepareRequestWithMessagesAndSchema combines message-based requests with JSON schema validation.
+func (p *MistralProvider) PrepareRequestWithMessagesAndSchema(messages []types.MemoryMessage, options map[string]interface{}, schema interface{}) ([]byte, error) {
+	responseFormat := map[string]interface{}{
+		"type":   "json_schema",
+		"schema": schema,
+	}
+	if strict, ok := options["strict"].(bool); ok && strict {
+		responseFormat["strict"] = true
+	}
+
+	newOptions := make(map[string]interface{}, len(options)+1)
+	for k, v := range options {
+		newOptions[k] = v
+	}
+	newOptions["response_format"] = responseFormat
+	return p.PrepareRequestWithMessages(messages, newOptions)
 }

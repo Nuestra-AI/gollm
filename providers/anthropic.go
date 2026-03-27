@@ -323,7 +323,11 @@ func splitSystemPrompt(prompt string, n int) []string {
 //   - Serialized JSON request body
 //   - Any error encountered during preparation
 func (p *AnthropicProvider) PrepareRequestWithSchema(prompt string, options map[string]interface{}, schema interface{}) ([]byte, error) {
-	schemaJSON, err := json.MarshalIndent(schema, "", "  ")
+	schemaObj, err := normalizeSchema(schema)
+	if err != nil {
+		return nil, fmt.Errorf("failed to normalize schema: %w", err)
+	}
+	schemaJSON, err := json.Marshal(schemaObj)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal schema: %w", err)
 	}
@@ -1011,4 +1015,43 @@ func (p *AnthropicProvider) PrepareRequestWithMessages(messages []types.MemoryMe
 	}
 
 	return json.Marshal(requestBody)
+}
+
+// PrepareRequestWithMessagesAndSchema creates a request body using structured message objects
+// and a JSON schema for response validation. Since Anthropic doesn't natively support
+// structured output schemas, the schema is embedded in the system prompt.
+//
+// Parameters:
+//   - messages: Slice of MemoryMessage objects representing the conversation
+//   - options: Additional options for the request
+//   - schema: JSON schema for response validation
+//
+// Returns:
+//   - Serialized JSON request body
+//   - Any error encountered during preparation
+func (p *AnthropicProvider) PrepareRequestWithMessagesAndSchema(messages []types.MemoryMessage, options map[string]interface{}, schema interface{}) ([]byte, error) {
+	schemaJSON, err := json.Marshal(schema)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal schema: %w", err)
+	}
+
+	schemaInstruction := fmt.Sprintf("You must respond with a JSON object that strictly adheres to this schema:\n%s\nDo not include any explanatory text, only output valid JSON.", string(schemaJSON))
+
+	// Combine user system prompt with schema instruction
+	sp := ""
+	if existing, ok := options["system_prompt"].(string); ok && existing != "" {
+		sp = existing
+	}
+	combinedSystemPrompt := schemaInstruction
+	if sp != "" {
+		combinedSystemPrompt = sp + "\n\n" + schemaInstruction
+	}
+
+	newOptions := make(map[string]interface{}, len(options)+1)
+	for k, v := range options {
+		newOptions[k] = v
+	}
+	newOptions["system_prompt"] = combinedSystemPrompt
+
+	return p.PrepareRequestWithMessages(messages, newOptions)
 }

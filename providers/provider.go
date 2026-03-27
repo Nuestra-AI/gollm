@@ -5,6 +5,7 @@
 package providers
 
 import (
+	"encoding/json"
 	"fmt"
 	"sync"
 
@@ -47,6 +48,12 @@ type Provider interface {
 	//   - Serialized JSON request body
 	//   - Any error encountered during preparation
 	PrepareRequestWithMessages(messages []types.MemoryMessage, options map[string]interface{}) ([]byte, error)
+
+	// PrepareRequestWithMessagesAndSchema creates a request body using structured
+	// message objects combined with JSON schema validation. This enables providers
+	// to use their native schema enforcement (e.g., response_format) while
+	// preserving conversation structure.
+	PrepareRequestWithMessagesAndSchema(messages []types.MemoryMessage, options map[string]interface{}, schema interface{}) ([]byte, error)
 
 	// ParseResponse extracts the generated text from the API response.
 	// It handles provider-specific response formats and error cases.
@@ -138,6 +145,37 @@ type ProviderConfig struct {
 
 	// SupportsStreaming indicates if streaming is supported
 	SupportsStreaming bool
+}
+
+// normalizeSchema converts a schema from various input types (string, []byte, struct)
+// into a generic interface{} suitable for JSON serialization.
+func normalizeSchema(schema interface{}) (interface{}, error) {
+	switch s := schema.(type) {
+	case string:
+		var obj interface{}
+		if err := json.Unmarshal([]byte(s), &obj); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal schema string: %w", err)
+		}
+		return obj, nil
+	case []byte:
+		var obj interface{}
+		if err := json.Unmarshal(s, &obj); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal schema bytes: %w", err)
+		}
+		return obj, nil
+	case map[string]interface{}:
+		return s, nil
+	default:
+		schemaBytes, err := json.Marshal(schema)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal schema: %w", err)
+		}
+		var obj interface{}
+		if err := json.Unmarshal(schemaBytes, &obj); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal schema: %w", err)
+		}
+		return obj, nil
+	}
 }
 
 // ProviderConstructor defines a function type for creating new provider instances.

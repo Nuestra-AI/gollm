@@ -381,28 +381,10 @@ func (p *OpenAIProvider) PrepareRequest(prompt string, options map[string]interf
 func (p *OpenAIProvider) PrepareRequestWithSchema(prompt string, options map[string]interface{}, schema interface{}) ([]byte, error) {
 	p.logger.Debug("Preparing request with schema", "prompt", prompt, "schema", schema)
 
-	// First, ensure we have a proper object for the schema
-	var schemaObj interface{}
-	switch s := schema.(type) {
-	case string:
-		if err := json.Unmarshal([]byte(s), &schemaObj); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal schema string: %w", err)
-		}
-	case []byte:
-		if err := json.Unmarshal(s, &schemaObj); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal schema bytes: %w", err)
-		}
-	case map[string]interface{}:
-		schemaObj = s
-	default:
-		// Try to marshal and unmarshal to ensure we have a proper object
-		schemaBytes, err := json.Marshal(schema)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal schema: %w", err)
-		}
-		if err := json.Unmarshal(schemaBytes, &schemaObj); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal schema: %w", err)
-		}
+	// Normalize the schema to handle different input types (string, []byte, struct)
+	schemaObj, err := normalizeSchema(schema)
+	if err != nil {
+		return nil, fmt.Errorf("failed to normalize schema: %w", err)
 	}
 
 	// Clean the schema for OpenAI by removing unsupported validation rules
@@ -1171,6 +1153,213 @@ func (p *OpenAIProvider) PrepareRequestWithMessages(messages []types.MemoryMessa
 		// For other models, ensure we use max_tokens and not max_completion_tokens
 		if _, hasMaxCompletionTokens := mergedOptions["max_completion_tokens"]; hasMaxCompletionTokens {
 			// Move max_completion_tokens value to max_tokens
+			mergedOptions["max_tokens"] = mergedOptions["max_completion_tokens"]
+			delete(mergedOptions, "max_completion_tokens")
+		}
+	}
+
+	// Handle reasoning_effort option
+	if !p.needsReasoningEffort() {
+		delete(mergedOptions, "reasoning_effort")
+	}
+
+	// Remove temperature from mergedOptions if model doesn't support it
+	if p.needsNoTemperature() {
+		delete(mergedOptions, "temperature")
+	}
+
+	// Remove tool_choice from request if model doesn't support it
+	if p.needsNoToolChoice() {
+		delete(request, "tool_choice")
+	}
+
+	// Add merged options to the request
+	for k, v := range mergedOptions {
+		request[k] = v
+	}
+
+	return json.Marshal(request)
+}
+
+// PrepareRequestWithMessagesAndSchema creates a request that includes both
+// conversation messages and JSON schema validation for structured output.
+// It combines the message-building logic from PrepareRequestWithMessages
+// with the response_format schema block from PrepareRequestWithSchema.
+//
+// Parameters:
+//   - messages: Slice of MemoryMessage objects representing the conversation
+//   - options: Additional options for the request
+//   - schema: JSON schema for response validation
+//
+// Returns:
+//   - Serialized JSON request body
+//   - Any error encountered during preparation
+func (p *OpenAIProvider) PrepareRequestWithMessagesAndSchema(messages []types.MemoryMessage, options map[string]interface{}, schema interface{}) ([]byte, error) {
+	p.logger.Debug("Preparing request with messages and schema", "schema", schema)
+
+	// Normalize the schema
+	var schemaObj interface{}
+	switch s := schema.(type) {
+	case string:
+		if err := json.Unmarshal([]byte(s), &schemaObj); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal schema string: %w", err)
+		}
+	case []byte:
+		if err := json.Unmarshal(s, &schemaObj); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal schema bytes: %w", err)
+		}
+	case map[string]interface{}:
+		schemaObj = s
+	default:
+		// Try to marshal and unmarshal to ensure we have a proper object
+		schemaBytes, err := json.Marshal(schema)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal schema: %w", err)
+		}
+		if err := json.Unmarshal(schemaBytes, &schemaObj); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal schema: %w", err)
+		}
+	}
+
+	// Clean the schema for OpenAI by removing unsupported validation rules
+	cleanSchema := cleanSchemaForOpenAI(schemaObj)
+
+	// Debug log the cleaned schema
+	cleanSchemaJSON, _ := json.MarshalIndent(cleanSchema, "", "  ")
+	p.logger.Debug("Cleaned schema for OpenAI", "schema", string(cleanSchemaJSON))
+
+	request := map[string]interface{}{
+		"model":    p.model,
+		"messages": []map[string]interface{}{},
+		"response_format": map[string]interface{}{
+			"type": "json_schema",
+			"json_schema": map[string]interface{}{
+				"name":   "structured_response",
+				"schema": cleanSchema,
+				"strict": true,
+			},
+		},
+	}
+
+	// Handle system prompt as system message
+	if systemPrompt, ok := options["system_prompt"].(string); ok && systemPrompt != "" {
+		request["messages"] = append(request["messages"].([]map[string]interface{}), map[string]interface{}{
+			"role":    "system",
+			"content": systemPrompt,
+		})
+	}
+
+	// Convert MemoryMessage objects to OpenAI messages format
+	for _, msg := range messages {
+		message := map[string]interface{}{
+			"role": msg.Role,
+		}
+
+		// Handle tool result messages (role=tool)
+		if msg.Role == "tool" && msg.ToolCallID != "" {
+			message["tool_call_id"] = msg.ToolCallID
+			message["content"] = msg.Content
+		} else if len(msg.ToolCalls) > 0 {
+			// Handle assistant messages with tool calls
+			// OpenAI expects tool_calls array for assistant messages
+			toolCalls := make([]map[string]interface{}, len(msg.ToolCalls))
+			for i, tc := range msg.ToolCalls {
+				toolCalls[i] = map[string]interface{}{
+					"id":   tc.ID,
+					"type": tc.Type,
+					"function": map[string]interface{}{
+						"name":      tc.Function.Name,
+						"arguments": string(tc.Function.Arguments),
+					},
+				}
+			}
+			message["tool_calls"] = toolCalls
+			// Content can be empty or contain text alongside tool calls
+			if msg.Content != "" {
+				message["content"] = msg.Content
+			}
+		} else if msg.HasMultiContent() {
+			// Handle multimodal content (text + images)
+			message["content"] = BuildOpenAIContentFromParts(msg.MultiContent)
+		} else {
+			// Regular text message
+			message["content"] = msg.Content
+		}
+
+		// Add metadata if present (excluding tool-related fields already handled)
+		if len(msg.Metadata) > 0 {
+			for k, v := range msg.Metadata {
+				if k != "tool_calls" && k != "tool_call_id" {
+					message[k] = v
+				}
+			}
+		}
+
+		request["messages"] = append(request["messages"].([]map[string]interface{}), message)
+	}
+
+	// Handle tools
+	if tools, ok := options["tools"].([]utils.Tool); ok && len(tools) > 0 {
+		// Filter out web_search tools - OpenAI doesn't support them
+		openAITools := []map[string]interface{}{}
+		for _, tool := range tools {
+			// Skip web_search tools - OpenAI doesn't support them
+			if tool.Type == "web_search" {
+				p.logger.Debug("Skipping web_search tool - OpenAI doesn't support web_search")
+				continue
+			}
+
+			// Handle regular function tools
+			toolDef := map[string]interface{}{
+				"type": "function",
+				"function": map[string]interface{}{
+					"name":        tool.Function.Name,
+					"description": tool.Function.Description,
+					"parameters":  tool.Function.Parameters,
+				},
+			}
+			if strictTools, ok := options["strict_tools"].(bool); ok && strictTools {
+				toolDef["strict"] = true
+			}
+			openAITools = append(openAITools, toolDef)
+		}
+
+		// Only add tools to request if we have any non-web_search tools
+		if len(openAITools) > 0 {
+			request["tools"] = openAITools
+
+			// Handle tool_choice (only if model supports it and we have tools)
+			if toolChoice, ok := options["tool_choice"].(string); ok && !p.needsNoToolChoice() {
+				request["tool_choice"] = toolChoice
+			}
+		}
+	}
+
+	// Create a merged copy of options to handle token parameters properly
+	mergedOptions := make(map[string]interface{})
+
+	// First add options from provider (p.options)
+	for k, v := range p.options {
+		if k != "tools" && k != "tool_choice" && k != "system_prompt" && k != "structured_messages" {
+			mergedOptions[k] = v
+		}
+	}
+
+	// Then add options from the function parameters (may override provider options)
+	for k, v := range options {
+		if k != "tools" && k != "tool_choice" && k != "strict_tools" && k != "system_prompt" && k != "structured_messages" && k != "images" {
+			mergedOptions[k] = v
+		}
+	}
+
+	// Handle max_tokens/max_completion_tokens conflict
+	if p.needsMaxCompletionTokens() {
+		if _, hasMaxTokens := mergedOptions["max_tokens"]; hasMaxTokens {
+			mergedOptions["max_completion_tokens"] = mergedOptions["max_tokens"]
+			delete(mergedOptions, "max_tokens")
+		}
+	} else {
+		if _, hasMaxCompletionTokens := mergedOptions["max_completion_tokens"]; hasMaxCompletionTokens {
 			mergedOptions["max_tokens"] = mergedOptions["max_completion_tokens"]
 			delete(mergedOptions, "max_completion_tokens")
 		}

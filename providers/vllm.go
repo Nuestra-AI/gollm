@@ -415,3 +415,26 @@ func (p *VLLMProvider) PrepareRequestWithMessages(messages []types.MemoryMessage
 
 	return json.Marshal(request)
 }
+
+// PrepareRequestWithMessagesAndSchema combines message-based requests with JSON schema validation.
+func (p *VLLMProvider) PrepareRequestWithMessagesAndSchema(messages []types.MemoryMessage, options map[string]interface{}, schema interface{}) ([]byte, error) {
+	// Normalize schema (may arrive as string, []byte, or struct)
+	schemaObj, err := normalizeSchema(schema)
+	if err != nil {
+		return nil, err
+	}
+
+	newOptions := make(map[string]interface{}, len(options)+1)
+	for k, v := range options {
+		newOptions[k] = v
+	}
+	newOptions["response_format"] = map[string]interface{}{
+		"type": "json_schema",
+		"json_schema": map[string]interface{}{
+			"name":   "structured_response",
+			"schema": schemaObj,
+			"strict": true,
+		},
+	}
+	return p.PrepareRequestWithMessages(messages, newOptions)
+}

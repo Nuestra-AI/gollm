@@ -21,6 +21,7 @@ var cohereSupportedParams = map[string]bool{
 	"k":                 true,
 	"p":                 true,
 	"stream":            true,
+	"response_format":   true,
 }
 
 // CohereProvider implements the Provider interface for Cohere's API.
@@ -189,6 +190,11 @@ func (p *CohereProvider) PrepareRequest(prompt string, options map[string]any) (
 //   - Serialized JSON request body
 //   - Any error encountered during preparation
 func (p *CohereProvider) PrepareRequestWithSchema(prompt string, options map[string]any, schema any) ([]byte, error) {
+	schemaObj, err := normalizeSchema(schema)
+	if err != nil {
+		return nil, fmt.Errorf("failed to normalize schema: %w", err)
+	}
+
 	requestBody := map[string]any{
 		"model": p.model,
 		"messages": []map[string]any{
@@ -196,7 +202,7 @@ func (p *CohereProvider) PrepareRequestWithSchema(prompt string, options map[str
 		},
 		"response_format": map[string]any{
 			"type":        "json_object",
-			"json_schema": schema,
+			"json_schema": schemaObj,
 		},
 	}
 
@@ -456,4 +462,18 @@ func (p *CohereProvider) PrepareRequestWithMessages(messages []types.MemoryMessa
 	}
 
 	return json.Marshal(request)
+}
+
+// PrepareRequestWithMessagesAndSchema creates a request body using structured messages
+// combined with JSON schema validation using Cohere's response_format.
+func (p *CohereProvider) PrepareRequestWithMessagesAndSchema(messages []types.MemoryMessage, options map[string]interface{}, schema interface{}) ([]byte, error) {
+	newOptions := make(map[string]interface{}, len(options)+1)
+	for k, v := range options {
+		newOptions[k] = v
+	}
+	newOptions["response_format"] = map[string]interface{}{
+		"type":        "json_object",
+		"json_schema": schema,
+	}
+	return p.PrepareRequestWithMessages(messages, newOptions)
 }

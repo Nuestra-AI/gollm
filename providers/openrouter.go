@@ -315,10 +315,14 @@ func (p *OpenRouterProvider) PrepareRequestWithSchema(prompt string, options map
 
 	req["messages"] = messages
 
-	// Add JSON schema to the response format
+	// Normalize and add JSON schema to the response format
+	schemaObj, err := normalizeSchema(schema)
+	if err != nil {
+		return nil, fmt.Errorf("failed to normalize schema: %w", err)
+	}
 	req["response_format"] = map[string]interface{}{
 		"type":   "json_object",
-		"schema": schema,
+		"schema": schemaObj,
 	}
 
 	// Handle tools/function calling if provided
@@ -795,5 +799,19 @@ func (p *OpenRouterProvider) PrepareRequestWithMessages(messages []types.MemoryM
 	}
 
 	return json.Marshal(req)
+}
+
+// PrepareRequestWithMessagesAndSchema creates a request body using structured messages
+// combined with JSON schema validation using OpenRouter's response_format.
+func (p *OpenRouterProvider) PrepareRequestWithMessagesAndSchema(messages []types.MemoryMessage, options map[string]interface{}, schema interface{}) ([]byte, error) {
+	newOptions := make(map[string]interface{}, len(options)+1)
+	for k, v := range options {
+		newOptions[k] = v
+	}
+	newOptions["response_format"] = map[string]interface{}{
+		"type":   "json_object",
+		"schema": schema,
+	}
+	return p.PrepareRequestWithMessages(messages, newOptions)
 }
 

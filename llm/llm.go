@@ -253,32 +253,24 @@ func (l *LLMImpl) attemptGenerate(ctx context.Context, prompt *Prompt) (string, 
 	var reqBody []byte
 	var err error
 
-	// Check if we have structured messages
+	// Check if we have structured messages from options (memory system)
 	l.optionsMutex.RLock()
 	structuredMessages, hasStructuredMessages := l.Options["structured_messages"]
 	l.optionsMutex.RUnlock()
 
-	// Check if we have structured messages
 	if hasStructuredMessages {
-		// Use the structured messages API if the provider supports it
-		if prepareWithMessages, ok := l.Provider.(interface {
-			PrepareRequestWithMessages(messages []types.MemoryMessage, options map[string]interface{}) ([]byte, error)
-		}); ok {
-			// Convert to the expected type
-			messages, ok := structuredMessages.([]types.MemoryMessage)
-			if ok {
-				l.logger.Debug("Using structured messages API", "message_count", len(messages))
-				reqBody, err = prepareWithMessages.PrepareRequestWithMessages(messages, options)
-			} else {
-				l.logger.Warn("Invalid structured_messages format", "type", fmt.Sprintf("%T", structuredMessages))
-				// Fall back to regular prepare
-				reqBody, err = l.Provider.PrepareRequest(prompt.String(), options)
-			}
+		messages, ok := structuredMessages.([]types.MemoryMessage)
+		if ok {
+			l.logger.Debug("Using structured messages API", "message_count", len(messages))
+			reqBody, err = l.Provider.PrepareRequestWithMessages(messages, options)
 		} else {
-			l.logger.Debug("Provider does not support structured messages API", "provider", l.Provider.Name())
-			// Provider doesn't support structured messages, fall back to normal request
+			l.logger.Warn("Invalid structured_messages format", "type", fmt.Sprintf("%T", structuredMessages))
 			reqBody, err = l.Provider.PrepareRequest(prompt.String(), options)
 		}
+	} else if prompt.hasStructuredMessages() {
+		messages := promptMessagesToMemoryMessages(prompt.Messages)
+		l.logger.Debug("Using prompt structured messages", "message_count", len(messages))
+		reqBody, err = l.Provider.PrepareRequestWithMessages(messages, options)
 	} else {
 		// Standard request preparation
 		reqBody, err = l.Provider.PrepareRequest(prompt.String(), options)
@@ -370,7 +362,7 @@ func (l *LLMImpl) GenerateWithSchema(ctx context.Context, prompt *Prompt, schema
 	for attempt := 0; attempt <= l.MaxRetries; attempt++ {
 		l.logger.Debug("Generating text with schema", "provider", l.Provider.Name(), "prompt", prompt.String(), "attempt", attempt+1)
 
-		result, _, lastErr = l.attemptGenerateWithSchema(ctx, prompt.String(), schema)
+		result, _, lastErr = l.attemptGenerateWithSchema(ctx, prompt, schema)
 		if lastErr == nil {
 			return result, nil
 		}
@@ -405,11 +397,6 @@ func (l *LLMImpl) GenerateWithUsage(ctx context.Context, prompt *Prompt, opts ..
 	config := &GenerateConfig{}
 	for _, opt := range opts {
 		opt(config)
-	}
-
-	// Set the system prompt in the LLM's options
-	if prompt.SystemPrompt != "" {
-		l.SetOption("system_prompt", prompt.SystemPrompt)
 	}
 
 	var result string
@@ -456,7 +443,7 @@ func (l *LLMImpl) GenerateWithSchemaAndUsage(ctx context.Context, prompt *Prompt
 	for attempt := 0; attempt <= l.MaxRetries; attempt++ {
 		l.logger.Debug("Generating text with schema and usage tracking", "provider", l.Provider.Name(), "prompt", prompt.String(), "attempt", attempt+1)
 
-		result, details, _, lastErr = l.attemptGenerateWithSchemaAndUsage(ctx, prompt.String(), schema)
+		result, details, _, lastErr = l.attemptGenerateWithSchemaAndUsage(ctx, prompt, schema)
 		if lastErr == nil {
 			return result, details, nil
 		}
@@ -490,6 +477,11 @@ func (l *LLMImpl) attemptGenerateWithUsage(ctx context.Context, prompt *Prompt) 
 	}
 	l.optionsMutex.RUnlock()
 
+	// Set system prompt from the prompt object into local options (not l.Options)
+	if prompt.SystemPrompt != "" {
+		options["system_prompt"] = prompt.SystemPrompt
+	}
+
 	// Add Tools and ToolChoice to options
 	if len(prompt.Tools) > 0 {
 		options["tools"] = prompt.Tools
@@ -507,22 +499,18 @@ func (l *LLMImpl) attemptGenerateWithUsage(ctx context.Context, prompt *Prompt) 
 	l.optionsMutex.RUnlock()
 
 	if hasStructuredMessages {
-		// Use the structured messages API if the provider supports it
-		if prepareWithMessages, ok := l.Provider.(interface {
-			PrepareRequestWithMessages(messages []types.MemoryMessage, options map[string]interface{}) ([]byte, error)
-		}); ok {
-			messages, ok := structuredMessages.([]types.MemoryMessage)
-			if ok {
-				l.logger.Debug("Using structured messages API", "message_count", len(messages))
-				reqBody, err = prepareWithMessages.PrepareRequestWithMessages(messages, options)
-			} else {
-				l.logger.Warn("Invalid structured_messages format", "type", fmt.Sprintf("%T", structuredMessages))
-				reqBody, err = l.Provider.PrepareRequest(prompt.String(), options)
-			}
+		messages, ok := structuredMessages.([]types.MemoryMessage)
+		if ok {
+			l.logger.Debug("Using structured messages API", "message_count", len(messages))
+			reqBody, err = l.Provider.PrepareRequestWithMessages(messages, options)
 		} else {
-			l.logger.Debug("Provider does not support structured messages API", "provider", l.Provider.Name())
+			l.logger.Warn("Invalid structured_messages format", "type", fmt.Sprintf("%T", structuredMessages))
 			reqBody, err = l.Provider.PrepareRequest(prompt.String(), options)
 		}
+	} else if prompt.hasStructuredMessages() {
+		messages := promptMessagesToMemoryMessages(prompt.Messages)
+		l.logger.Debug("Using prompt structured messages", "message_count", len(messages))
+		reqBody, err = l.Provider.PrepareRequestWithMessages(messages, options)
 	} else {
 		// Standard request preparation
 		reqBody, err = l.Provider.PrepareRequest(prompt.String(), options)
@@ -581,6 +569,51 @@ func (l *LLMImpl) attemptGenerateWithUsage(ctx context.Context, prompt *Prompt) 
 	return result, details, nil
 }
 
+// prepareSchemaRequestBody builds the options map from the prompt and prepares
+// the request body for schema-based generation. It centralises the logic shared
+// by attemptGenerateWithSchema and attemptGenerateWithSchemaAndUsage.
+func (l *LLMImpl) prepareSchemaRequestBody(prompt *Prompt, schema interface{}) (reqBody []byte, fullPrompt string, err error) {
+	l.optionsMutex.RLock()
+	options := make(map[string]interface{})
+	for k, v := range l.Options {
+		options[k] = v
+	}
+	l.optionsMutex.RUnlock()
+
+	// Set system prompt from the prompt object into local options (not l.Options)
+	if prompt.SystemPrompt != "" {
+		options["system_prompt"] = prompt.SystemPrompt
+	}
+
+	// Add Tools and ToolChoice to options
+	if len(prompt.Tools) > 0 {
+		options["tools"] = prompt.Tools
+	}
+	if len(prompt.ToolChoice) > 0 {
+		options["tool_choice"] = prompt.ToolChoice
+	}
+
+	// Add Images to options for vision-capable models
+	if prompt.HasImages() {
+		options["images"] = prompt.Images
+	}
+
+	if prompt.hasStructuredMessages() {
+		messages := promptMessagesToMemoryMessages(prompt.Messages)
+		l.logger.Debug("Using prompt structured messages with schema", "message_count", len(messages))
+		reqBody, err = l.Provider.PrepareRequestWithMessagesAndSchema(messages, options, schema)
+		fullPrompt = prompt.String()
+	} else if l.SupportsJSONSchema() {
+		reqBody, err = l.Provider.PrepareRequestWithSchema(prompt.String(), options, schema)
+		fullPrompt = prompt.String()
+	} else {
+		fullPrompt = l.preparePromptWithSchema(prompt.String(), schema)
+		reqBody, err = l.Provider.PrepareRequest(fullPrompt, options)
+	}
+
+	return reqBody, fullPrompt, err
+}
+
 // attemptGenerateWithSchemaAndUsage makes a single attempt to generate text with schema validation and response details.
 // It combines schema validation with response details extraction.
 //
@@ -589,26 +622,8 @@ func (l *LLMImpl) attemptGenerateWithUsage(ctx context.Context, prompt *Prompt) 
 //   - Response details (or nil if not available)
 //   - Full prompt used for generation
 //   - Any error encountered during the attempt
-func (l *LLMImpl) attemptGenerateWithSchemaAndUsage(ctx context.Context, prompt string, schema interface{}) (string, *types.ResponseDetails, string, error) {
-	var reqBody []byte
-	var err error
-	var fullPrompt string
-
-	l.optionsMutex.RLock()
-	options := make(map[string]interface{})
-	for k, v := range l.Options {
-		options[k] = v
-	}
-	l.optionsMutex.RUnlock()
-
-	if l.SupportsJSONSchema() {
-		reqBody, err = l.Provider.PrepareRequestWithSchema(prompt, options, schema)
-		fullPrompt = prompt
-	} else {
-		fullPrompt = l.preparePromptWithSchema(prompt, schema)
-		reqBody, err = l.Provider.PrepareRequest(fullPrompt, options)
-	}
-
+func (l *LLMImpl) attemptGenerateWithSchemaAndUsage(ctx context.Context, prompt *Prompt, schema interface{}) (string, *types.ResponseDetails, string, error) {
+	reqBody, fullPrompt, err := l.prepareSchemaRequestBody(prompt, schema)
 	if err != nil {
 		return "", nil, fullPrompt, NewLLMError(ErrorTypeRequest, "failed to prepare request", err)
 	}
@@ -676,26 +691,8 @@ func (l *LLMImpl) attemptGenerateWithSchemaAndUsage(ctx context.Context, prompt 
 //   - Full prompt used for generation
 //   - ErrorTypeInvalidInput for schema validation failures
 //   - Other error types as per attemptGenerate
-func (l *LLMImpl) attemptGenerateWithSchema(ctx context.Context, prompt string, schema interface{}) (string, string, error) {
-	var reqBody []byte
-	var err error
-	var fullPrompt string
-
-	l.optionsMutex.RLock()
-	options := make(map[string]interface{})
-	for k, v := range l.Options {
-		options[k] = v
-	}
-	l.optionsMutex.RUnlock()
-
-	if l.SupportsJSONSchema() {
-		reqBody, err = l.Provider.PrepareRequestWithSchema(prompt, options, schema)
-		fullPrompt = prompt
-	} else {
-		fullPrompt = l.preparePromptWithSchema(prompt, schema)
-		reqBody, err = l.Provider.PrepareRequest(fullPrompt, options)
-	}
-
+func (l *LLMImpl) attemptGenerateWithSchema(ctx context.Context, prompt *Prompt, schema interface{}) (string, string, error) {
+	reqBody, fullPrompt, err := l.prepareSchemaRequestBody(prompt, schema)
 	if err != nil {
 		return "", fullPrompt, NewLLMError(ErrorTypeRequest, "failed to prepare request", err)
 	}

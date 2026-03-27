@@ -684,6 +684,79 @@ func (p *GenericProvider) prepareOpenAIRequestWithMessages(messages []types.Memo
 	return json.Marshal(requestOptions)
 }
 
+// PrepareRequestWithMessagesAndSchema creates a request body using structured messages
+// combined with JSON schema validation.
+func (p *GenericProvider) PrepareRequestWithMessagesAndSchema(messages []types.MemoryMessage, options map[string]interface{}, schema interface{}) ([]byte, error) {
+	if !p.config.SupportsSchema {
+		return nil, fmt.Errorf("provider %s does not support JSON schema validation", p.config.Name)
+	}
+
+	switch p.config.Type {
+	case TypeOpenAI:
+		return p.prepareOpenAIRequestWithMessagesAndSchema(messages, options, schema)
+	case TypeAnthropic, TypeClaude:
+		return p.prepareAnthropicRequestWithMessagesAndSchema(messages, options, schema)
+	default:
+		return nil, fmt.Errorf("JSON schema not supported for provider type: %s", p.config.Type)
+	}
+}
+
+// prepareOpenAIRequestWithMessagesAndSchema creates a request for OpenAI APIs
+// using structured messages and JSON schema validation.
+func (p *GenericProvider) prepareOpenAIRequestWithMessagesAndSchema(messages []types.MemoryMessage, options map[string]interface{}, schema interface{}) ([]byte, error) {
+	schemaObj, err := normalizeSchema(schema)
+	if err != nil {
+		return nil, fmt.Errorf("failed to normalize schema: %w", err)
+	}
+
+	newOptions := make(map[string]interface{}, len(options)+3)
+	for k, v := range options {
+		newOptions[k] = v
+	}
+	newOptions["response_format"] = map[string]interface{}{
+		"type": "json_object",
+	}
+	newOptions["functions"] = []map[string]interface{}{
+		{
+			"name":        "output_formatter",
+			"description": "Format the output according to the schema",
+			"parameters":  schemaObj,
+		},
+	}
+	newOptions["function_call"] = map[string]interface{}{
+		"name": "output_formatter",
+	}
+	return p.prepareOpenAIRequestWithMessages(messages, newOptions)
+}
+
+// prepareAnthropicRequestWithMessagesAndSchema creates a request for Anthropic APIs
+// using structured messages and JSON schema validation via system prompt injection.
+func (p *GenericProvider) prepareAnthropicRequestWithMessagesAndSchema(messages []types.MemoryMessage, options map[string]interface{}, schema interface{}) ([]byte, error) {
+	schemaObj, err := normalizeSchema(schema)
+	if err != nil {
+		return nil, fmt.Errorf("failed to normalize schema: %w", err)
+	}
+	schemaBytes, err := json.Marshal(schemaObj)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal schema: %v", err)
+	}
+
+	schemaInstruction := fmt.Sprintf("You must respond with a JSON object that strictly adheres to this schema:\n%s\nDo not include any explanatory text, only output valid JSON.", string(schemaBytes))
+
+	// Combine system prompt (user's first) with schema instruction
+	modifiedOptions := make(map[string]interface{})
+	for k, v := range options {
+		modifiedOptions[k] = v
+	}
+	if sp, ok := options["system_prompt"].(string); ok && sp != "" {
+		modifiedOptions["system_prompt"] = sp + "\n\n" + schemaInstruction
+	} else {
+		modifiedOptions["system_prompt"] = schemaInstruction
+	}
+
+	return p.prepareAnthropicRequestWithMessages(messages, modifiedOptions)
+}
+
 // prepareAnthropicRequestWithMessages creates a request for Anthropic APIs using structured messages
 func (p *GenericProvider) prepareAnthropicRequestWithMessages(messages []types.MemoryMessage, options map[string]interface{}) ([]byte, error) {
 	requestOptions := make(map[string]interface{})

@@ -138,6 +138,11 @@ func (p *LambdaProvider) PrepareRequest(prompt string, options map[string]interf
 
 // PrepareRequestWithSchema creates a request that includes JSON schema validation.
 func (p *LambdaProvider) PrepareRequestWithSchema(prompt string, options map[string]interface{}, schema interface{}) ([]byte, error) {
+	schemaObj, err := normalizeSchema(schema)
+	if err != nil {
+		return nil, fmt.Errorf("failed to normalize schema: %w", err)
+	}
+
 	request := map[string]interface{}{
 		"model": p.model,
 		"messages": []map[string]interface{}{
@@ -147,7 +152,7 @@ func (p *LambdaProvider) PrepareRequestWithSchema(prompt string, options map[str
 			"type": "json_schema",
 			"json_schema": map[string]interface{}{
 				"name":   "structured_response",
-				"schema": schema,
+				"schema": schemaObj,
 				"strict": true,
 			},
 		},
@@ -341,4 +346,21 @@ func (p *LambdaProvider) PrepareRequestWithMessages(messages []types.MemoryMessa
 	}
 
 	return json.Marshal(request)
+}
+
+// PrepareRequestWithMessagesAndSchema combines message-based requests with JSON schema validation.
+func (p *LambdaProvider) PrepareRequestWithMessagesAndSchema(messages []types.MemoryMessage, options map[string]interface{}, schema interface{}) ([]byte, error) {
+	newOptions := make(map[string]interface{}, len(options)+1)
+	for k, v := range options {
+		newOptions[k] = v
+	}
+	newOptions["response_format"] = map[string]interface{}{
+		"type": "json_schema",
+		"json_schema": map[string]interface{}{
+			"name":   "structured_response",
+			"schema": schema,
+			"strict": true,
+		},
+	}
+	return p.PrepareRequestWithMessages(messages, newOptions)
 }

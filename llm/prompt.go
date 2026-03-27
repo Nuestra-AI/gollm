@@ -347,6 +347,38 @@ func (p *Prompt) String() string {
 	return builder.String()
 }
 
+// hasStructuredMessages returns true if the prompt has messages that should be
+// sent as structured API messages rather than flattened into a single string.
+// This is true for multi-turn conversations or messages with non-user roles
+// or tool calls.
+func (p *Prompt) hasStructuredMessages() bool {
+	if len(p.Messages) == 0 {
+		return false
+	}
+	if len(p.Messages) > 1 {
+		return true
+	}
+	msg := p.Messages[0]
+	return msg.Role != "user" || msg.ToolCallID != "" || len(msg.ToolCalls) > 0
+}
+
+// promptMessagesToMemoryMessages converts a PromptMessage slice to a
+// types.MemoryMessage slice for use with Provider.PrepareRequestWithMessages.
+func promptMessagesToMemoryMessages(msgs []PromptMessage) []types.MemoryMessage {
+	out := make([]types.MemoryMessage, len(msgs))
+	for i, m := range msgs {
+		out[i] = types.MemoryMessage{
+			Role:         m.Role,
+			Content:      m.Content,
+			MultiContent: m.MultiContent,
+			CacheControl: string(m.CacheType),
+			ToolCalls:    m.ToolCalls,
+			ToolCallID:   m.ToolCallID,
+		}
+	}
+	return out
+}
+
 // Validate checks if the prompt configuration is valid according to
 // its validation rules and constraints.
 //

@@ -403,3 +403,20 @@ func (p *OllamaProvider) PrepareRequestWithMessages(messages []types.MemoryMessa
 
 	return json.Marshal(requestBody)
 }
+
+// PrepareRequestWithMessagesAndSchema creates a request body using structured message objects
+// and a JSON schema for response validation. Ollama does not support structured output
+// schemas, so the schema parameter is ignored and the call is delegated to
+// PrepareRequestWithMessages.
+//
+// Parameters:
+//   - messages: Slice of MemoryMessage objects representing the conversation
+//   - options: Additional options for the request
+//   - schema: JSON schema for response validation (ignored)
+//
+// Returns:
+//   - Serialized JSON request body
+//   - Any error encountered during preparation
+func (p *OllamaProvider) PrepareRequestWithMessagesAndSchema(messages []types.MemoryMessage, options map[string]interface{}, schema interface{}) ([]byte, error) {
+	return p.PrepareRequestWithMessages(messages, options)
+}
