@@ -130,7 +130,7 @@ func (p *GenericProvider) Headers() map[string]string {
 		headers[k] = v
 	}
 
-	p.logger.Debug("Headers prepared", "headers", headers)
+	p.logger.Debug("Headers prepared", "headers", utils.RedactHeaders(headers))
 	return headers
 }
 

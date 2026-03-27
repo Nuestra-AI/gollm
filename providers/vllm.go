@@ -123,7 +123,7 @@ func (p *VLLMProvider) Headers() map[string]string {
 		headers[key] = value
 	}
 
-	p.logger.Debug("Headers prepared", "headers", headers)
+	p.logger.Debug("Headers prepared", "headers", utils.RedactHeaders(headers))
 	return headers
 }
 
@@ -296,7 +296,7 @@ func (p *VLLMProvider) HandleFunctionCalls(body []byte) ([]byte, error) {
 // SetExtraHeaders configures additional HTTP headers for API requests.
 func (p *VLLMProvider) SetExtraHeaders(extraHeaders map[string]string) {
 	p.extraHeaders = extraHeaders
-	p.logger.Debug("Extra headers set", "headers", extraHeaders)
+	p.logger.Debug("Extra headers set", "headers", utils.RedactHeaders(extraHeaders))
 }
 
 // SupportsStreaming indicates whether streaming is supported

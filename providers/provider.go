@@ -427,12 +427,15 @@ func GetDefaultRegistry() *ProviderRegistry {
 // with the specified name and configuration
 func RegisterGenericProvider(name string, config ProviderConfig) {
 	registry := GetDefaultRegistry()
-	registry.RegisterProviderConfig(name, config)
 
-	// Register a constructor that creates a GenericProvider with this config
+	// Hold the lock across both writes so config and constructor are
+	// registered atomically from the perspective of other goroutines.
+	registry.mutex.Lock()
+	registry.configs[name] = config
 	registry.providers[name] = func(apiKey, model string, extraHeaders map[string]string) Provider {
 		return NewGenericProvider(apiKey, model, name, extraHeaders)
 	}
+	registry.mutex.Unlock()
 }
 
 // Register adds a new provider constructor to the registry.

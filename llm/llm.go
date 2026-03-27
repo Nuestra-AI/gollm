@@ -286,12 +286,13 @@ func (l *LLMImpl) attemptGenerate(ctx context.Context, prompt *Prompt) (string, 
 		return "", NewLLMError(ErrorTypeRequest, "failed to create request", err)
 	}
 
-	for k, v := range l.Provider.Headers() {
+	headers := l.Provider.Headers()
+	for k, v := range headers {
 		req.Header.Set(k, v)
-		l.logger.Debug("Request header", "provider", l.Provider.Name(), "key", k, "value", v)
 	}
+	l.logger.Debug("Request headers", "provider", l.Provider.Name(), "headers", utils.RedactHeaders(headers))
 
-	l.logger.Wire("Full API request", "method", req.Method, "url", req.URL.String(), "headers", req.Header, "body", string(reqBody))
+	l.logger.Wire("Full API request", "method", req.Method, "url", req.URL.String(), "headers", utils.RedactHTTPHeaders(req.Header), "body", string(reqBody))
 	resp, err := l.client.Do(req)
 	if err != nil {
 		return "", NewLLMError(ErrorTypeRequest, "failed to send request", err)
@@ -530,7 +531,7 @@ func (l *LLMImpl) attemptGenerateWithUsage(ctx context.Context, prompt *Prompt) 
 		req.Header.Set(k, v)
 	}
 
-	l.logger.Wire("Full API request", "method", req.Method, "url", req.URL.String(), "headers", req.Header, "body", string(reqBody))
+	l.logger.Wire("Full API request", "method", req.Method, "url", req.URL.String(), "headers", utils.RedactHTTPHeaders(req.Header), "body", string(reqBody))
 	resp, err := l.client.Do(req)
 	if err != nil {
 		return "", nil, NewLLMError(ErrorTypeRequest, "failed to send request", err)
@@ -639,7 +640,7 @@ func (l *LLMImpl) attemptGenerateWithSchemaAndUsage(ctx context.Context, prompt 
 		req.Header.Set(k, v)
 	}
 
-	l.logger.Wire("Full API request", "method", req.Method, "url", req.URL.String(), "headers", req.Header, "body", string(reqBody))
+	l.logger.Wire("Full API request", "method", req.Method, "url", req.URL.String(), "headers", utils.RedactHTTPHeaders(req.Header), "body", string(reqBody))
 	resp, err := l.client.Do(req)
 	if err != nil {
 		return "", nil, fullPrompt, NewLLMError(ErrorTypeRequest, "failed to send request", err)
@@ -708,7 +709,7 @@ func (l *LLMImpl) attemptGenerateWithSchema(ctx context.Context, prompt *Prompt,
 		req.Header.Set(k, v)
 	}
 
-	l.logger.Wire("Full API request", "method", req.Method, "url", req.URL.String(), "headers", req.Header, "body", string(reqBody))
+	l.logger.Wire("Full API request", "method", req.Method, "url", req.URL.String(), "headers", utils.RedactHTTPHeaders(req.Header), "body", string(reqBody))
 	resp, err := l.client.Do(req)
 	if err != nil {
 		return "", fullPrompt, NewLLMError(ErrorTypeRequest, "failed to send request", err)
@@ -799,7 +800,7 @@ func (l *LLMImpl) Stream(ctx context.Context, prompt *Prompt, opts ...StreamOpti
 	}
 
 	// Make request
-	l.logger.Wire("Full API request", "method", req.Method, "url", req.URL.String(), "headers", req.Header, "body", string(body))
+	l.logger.Wire("Full API request", "method", req.Method, "url", req.URL.String(), "headers", utils.RedactHTTPHeaders(req.Header), "body", string(body))
 	resp, err := l.client.Do(req)
 	if err != nil {
 		return nil, NewLLMError(ErrorTypeAPI, "failed to make stream request", err)

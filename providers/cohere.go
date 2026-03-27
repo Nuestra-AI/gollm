@@ -390,7 +390,7 @@ func (p *CohereProvider) HandleFunctionCalls(body []byte) ([]byte, error) {
 // This allows for custom headers needed for specific features or requirements.
 func (p *CohereProvider) SetExtraHeaders(extraHeaders map[string]string) {
 	p.extraHeaders = extraHeaders
-	p.logger.Debug("Extra headers set", "headers", extraHeaders)
+	p.logger.Debug("Extra headers set", "headers", utils.RedactHeaders(extraHeaders))
 }
 
 // SupportsStreaming returns whether the provider supports streaming responses
