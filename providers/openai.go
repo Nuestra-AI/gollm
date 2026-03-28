@@ -86,37 +86,24 @@ func (p *OpenAIProvider) needsNoTemperature() bool {
 	return modelNeedsNoTemperature(p.model)
 }
 
-// modelNeedsNoTemperature checks if a given model doesn't support temperature
+// modelNeedsNoTemperature checks if a given model doesn't support temperature.
+// All o-series reasoning models (o1, o3, o4-mini, etc.) reject temperature.
+// GPT-5 family models also don't support temperature.
 func modelNeedsNoTemperature(model string) bool {
-	// Check for models that start with "o3"
-	if strings.HasPrefix(model, "o3") {
-		return true
-	}
-
-	if strings.Contains(model, "-5") {
-		return true
-	}
-
-	return false
+	return isOSeriesModel(model) || isGPT5Model(model)
 }
 
 func (p *OpenAIProvider) needsNoToolChoice() bool {
 	return modelNeedsNoToolChoice(p.model)
 }
 
-// modelNeedsNoToolChoice checks if a given model doesn't support tool_choice
+// modelNeedsNoToolChoice checks if a given model doesn't support tool_choice.
+// O-series reasoning models and GPT-5 don't support tool_choice.
 func modelNeedsNoToolChoice(model string) bool {
-	// O-series models (o1, o3, o4) don't support tool_choice
-	if strings.HasPrefix(model, "o1") || strings.HasPrefix(model, "o3") || strings.HasPrefix(model, "o4") {
+	if isOSeriesModel(model) {
 		return true
 	}
-
-	// GPT-5 models don't support tool_choice
-	if strings.Contains(model, "-5") {
-		return true
-	}
-
-	return false
+	return isGPT5Model(model)
 }
 
 // SetOption sets a specific option for the OpenAI provider.

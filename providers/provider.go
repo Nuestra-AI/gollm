@@ -233,7 +233,8 @@ func NewProviderRegistry(providerNames ...string) *ProviderRegistry {
 		"openrouter":    NewOpenRouterProvider,
 		"lambda":        NewLambdaProvider,
 		"bedrock":       NewBedrockProvider,
-		"vllm":          NewVLLMProvider,
+		"vllm":              NewVLLMProvider,
+		"openai-responses":  NewOpenAIResponsesProvider,
 	}
 
 	// Standard provider configurations
@@ -364,6 +365,16 @@ func NewProviderRegistry(providerNames ...string) *ProviderRegistry {
 			Endpoint:          "", // Configured by user for local vLLM server
 			AuthHeader:        "", // No authentication required
 			AuthPrefix:        "",
+			RequiredHeaders:   map[string]string{"Content-Type": "application/json"},
+			SupportsSchema:    true,
+			SupportsStreaming: true,
+		},
+		"openai-responses": {
+			Name:              "openai-responses",
+			Type:              TypeOpenAI,
+			Endpoint:          "https://api.openai.com/v1/responses",
+			AuthHeader:        "Authorization",
+			AuthPrefix:        "Bearer ",
 			RequiredHeaders:   map[string]string{"Content-Type": "application/json"},
 			SupportsSchema:    true,
 			SupportsStreaming: true,

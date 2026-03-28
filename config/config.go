@@ -408,6 +408,15 @@ func SetCustomValidator(fn func(interface{}) error) ConfigOption {
 }
 
 
+// WithOpenAIResponsesAPI switches the provider to "openai-responses" so that
+// requests use the /v1/responses endpoint instead of /v1/chat/completions.
+// This is a convenience wrapper — callers can also use SetProvider("openai-responses") directly.
+func WithOpenAIResponsesAPI() ConfigOption {
+	return func(c *Config) {
+		c.Provider = "openai-responses"
+	}
+}
+
 // ApplyOptions applies a series of ConfigOption functions to a Config instance.
 // This enables fluent configuration updates using the builder pattern.
 //

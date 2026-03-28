@@ -114,6 +114,9 @@ var (
 	// Validation configuration
 	SetCustomValidator = config.SetCustomValidator // Sets a custom validation function to override default validation
 
+	// API mode selection
+	WithOpenAIResponsesAPI = config.WithOpenAIResponsesAPI // Switches to OpenAI Responses API (/v1/responses)
+
 	// Configuration creation
 	NewConfig = config.NewConfig // Creates a new Config with default values
 

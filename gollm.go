@@ -271,6 +271,9 @@ func NewLLM(opts ...ConfigOption) (LLM, error) {
 		opt(cfg)
 	}
 
+	// For openai-responses, reuse the OpenAI API key
+	ensureResponsesAPIKey(cfg)
+
 	// For local LLM servers (Ollama, LM Studio, vLLM), ensure we have a dummy API key
 	if cfg.Provider == "ollama" || cfg.Provider == "lmstudio" || cfg.Provider == "vllm" {
 		if cfg.APIKeys == nil {
@@ -332,4 +335,18 @@ func NewLLM(opts ...ConfigOption) (LLM, error) {
 	}
 
 	return llmInstance, nil
+}
+
+// ensureResponsesAPIKey copies the "openai" API key to the "openai-responses"
+// slot when the latter is empty, since both providers share the same key.
+func ensureResponsesAPIKey(cfg *config.Config) {
+	if cfg.Provider != "openai-responses" {
+		return
+	}
+	if cfg.APIKeys == nil {
+		cfg.APIKeys = make(map[string]string)
+	}
+	if cfg.APIKeys["openai-responses"] == "" && cfg.APIKeys["openai"] != "" {
+		cfg.APIKeys["openai-responses"] = cfg.APIKeys["openai"]
+	}
 }
