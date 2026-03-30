@@ -131,8 +131,9 @@ type TokenUsage struct {
 // ResponseDetails contains comprehensive response metadata from an LLM API call.
 // This includes the message ID, token usage information, and other provider-specific details.
 type ResponseDetails struct {
-	ID         string                 `json:"id,omitempty"`       // Message/response ID from the provider
-	TokenUsage TokenUsage             `json:"token_usage"`        // Token consumption details
-	Model      string                 `json:"model,omitempty"`    // Model used for the response
-	Metadata   map[string]interface{} `json:"metadata,omitempty"` // Additional provider-specific metadata
+	ID         string                 `json:"id,omitempty"`         // Message/response ID from the provider
+	TokenUsage TokenUsage             `json:"token_usage"`          // Token consumption details
+	Model      string                 `json:"model,omitempty"`      // Model used for the response
+	Metadata   map[string]interface{} `json:"metadata,omitempty"`   // Additional provider-specific metadata
+	ToolCalls  []ToolCall             `json:"tool_calls,omitempty"` // Structured tool calls from the response (preserves ID, type, and arguments)
 }

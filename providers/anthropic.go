@@ -624,6 +624,9 @@ func (p *AnthropicProvider) ParseResponseWithUsage(body []byte) (string, *types.
 				pendingText.Reset()
 			}
 
+			// Preserve structured tool call data on ResponseDetails
+			details.ToolCalls = append(details.ToolCalls, types.NewToolCall(content.ID, content.Name, content.Input))
+
 			// Parse input as raw JSON to preserve the exact format
 			var args interface{}
 			if err := json.Unmarshal(content.Input, &args); err != nil {

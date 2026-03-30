@@ -257,6 +257,7 @@ func (p *MistralProvider) ParseResponseWithUsage(body []byte) (string, *types.Re
 			Message struct {
 				Content   string `json:"content"`
 				ToolCalls []struct {
+					ID       string `json:"id"`
 					Function struct {
 						Name      string          `json:"name"`
 						Arguments json.RawMessage `json:"arguments"`
@@ -296,6 +297,9 @@ func (p *MistralProvider) ParseResponseWithUsage(body []byte) (string, *types.Re
 
 	// Process tool calls if present
 	for _, toolCall := range response.Choices[0].Message.ToolCalls {
+		// Preserve structured tool call data on ResponseDetails
+		details.ToolCalls = append(details.ToolCalls, types.NewToolCall(toolCall.ID, toolCall.Function.Name, toolCall.Function.Arguments))
+
 		// Parse arguments as raw JSON to preserve the exact format
 		var args interface{}
 		if err := json.Unmarshal(toolCall.Function.Arguments, &args); err != nil {

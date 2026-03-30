@@ -715,6 +715,9 @@ func (p *OpenAIProvider) ParseResponseWithUsage(body []byte) (string, *types.Res
 	if len(message.ToolCalls) > 0 {
 		var functionCalls []string
 		for _, call := range message.ToolCalls {
+			// Preserve structured tool call data on ResponseDetails
+			details.ToolCalls = append(details.ToolCalls, types.NewToolCall(call.ID, call.Function.Name, call.Function.Arguments))
+
 			// Parse arguments as raw JSON to preserve the exact format
 			var args interface{}
 			if err := json.Unmarshal(call.Function.Arguments, &args); err != nil {
@@ -992,26 +995,15 @@ func (p *OpenAIProvider) ParseStreamResponse(chunk []byte) (string, error) {
 	return response.Choices[0].Delta.Content, nil
 }
 
-// PrepareRequestWithMessages creates a request body using structured message objects
-// rather than a flattened prompt string. This enables more efficient caching and
-// better preserves conversation structure for the OpenAI API.
-//
-// Parameters:
-//   - messages: Slice of MemoryMessage objects representing the conversation
-//   - options: Additional options for the request
-//
-// Returns:
-//   - Serialized JSON request body
-//   - Any error encountered during preparation
-func (p *OpenAIProvider) PrepareRequestWithMessages(messages []types.MemoryMessage, options map[string]interface{}) ([]byte, error) {
-	request := map[string]interface{}{
-		"model":    p.model,
-		"messages": []map[string]interface{}{},
-	}
+// buildOpenAIMessages converts MemoryMessage objects to the OpenAI messages format,
+// including an optional system prompt from options. This is shared by
+// PrepareRequestWithMessages and PrepareRequestWithMessagesAndSchema.
+func (p *OpenAIProvider) buildOpenAIMessages(messages []types.MemoryMessage, options map[string]interface{}) []map[string]interface{} {
+	var result []map[string]interface{}
 
 	// Handle system prompt as system message
 	if systemPrompt, ok := options["system_prompt"].(string); ok && systemPrompt != "" {
-		request["messages"] = append(request["messages"].([]map[string]interface{}), map[string]interface{}{
+		result = append(result, map[string]interface{}{
 			"role":    "system",
 			"content": systemPrompt,
 		})
@@ -1032,9 +1024,13 @@ func (p *OpenAIProvider) PrepareRequestWithMessages(messages []types.MemoryMessa
 			// OpenAI expects tool_calls array for assistant messages
 			toolCalls := make([]map[string]interface{}, len(msg.ToolCalls))
 			for i, tc := range msg.ToolCalls {
+				tcType := tc.Type
+				if tcType == "" {
+					tcType = "function"
+				}
 				toolCalls[i] = map[string]interface{}{
 					"id":   tc.ID,
-					"type": tc.Type,
+					"type": tcType,
 					"function": map[string]interface{}{
 						"name":      tc.Function.Name,
 						"arguments": string(tc.Function.Arguments),
@@ -1063,7 +1059,27 @@ func (p *OpenAIProvider) PrepareRequestWithMessages(messages []types.MemoryMessa
 			}
 		}
 
-		request["messages"] = append(request["messages"].([]map[string]interface{}), message)
+		result = append(result, message)
+	}
+
+	return result
+}
+
+// PrepareRequestWithMessages creates a request body using structured message objects
+// rather than a flattened prompt string. This enables more efficient caching and
+// better preserves conversation structure for the OpenAI API.
+//
+// Parameters:
+//   - messages: Slice of MemoryMessage objects representing the conversation
+//   - options: Additional options for the request
+//
+// Returns:
+//   - Serialized JSON request body
+//   - Any error encountered during preparation
+func (p *OpenAIProvider) PrepareRequestWithMessages(messages []types.MemoryMessage, options map[string]interface{}) ([]byte, error) {
+	request := map[string]interface{}{
+		"model":    p.model,
+		"messages": p.buildOpenAIMessages(messages, options),
 	}
 
 	// Handle tools
@@ -1228,62 +1244,7 @@ func (p *OpenAIProvider) PrepareRequestWithMessagesAndSchema(messages []types.Me
 		},
 	}
 
-	// Handle system prompt as system message
-	if systemPrompt, ok := options["system_prompt"].(string); ok && systemPrompt != "" {
-		request["messages"] = append(request["messages"].([]map[string]interface{}), map[string]interface{}{
-			"role":    "system",
-			"content": systemPrompt,
-		})
-	}
-
-	// Convert MemoryMessage objects to OpenAI messages format
-	for _, msg := range messages {
-		message := map[string]interface{}{
-			"role": msg.Role,
-		}
-
-		// Handle tool result messages (role=tool)
-		if msg.Role == "tool" && msg.ToolCallID != "" {
-			message["tool_call_id"] = msg.ToolCallID
-			message["content"] = msg.Content
-		} else if len(msg.ToolCalls) > 0 {
-			// Handle assistant messages with tool calls
-			// OpenAI expects tool_calls array for assistant messages
-			toolCalls := make([]map[string]interface{}, len(msg.ToolCalls))
-			for i, tc := range msg.ToolCalls {
-				toolCalls[i] = map[string]interface{}{
-					"id":   tc.ID,
-					"type": tc.Type,
-					"function": map[string]interface{}{
-						"name":      tc.Function.Name,
-						"arguments": string(tc.Function.Arguments),
-					},
-				}
-			}
-			message["tool_calls"] = toolCalls
-			// Content can be empty or contain text alongside tool calls
-			if msg.Content != "" {
-				message["content"] = msg.Content
-			}
-		} else if msg.HasMultiContent() {
-			// Handle multimodal content (text + images)
-			message["content"] = BuildOpenAIContentFromParts(msg.MultiContent)
-		} else {
-			// Regular text message
-			message["content"] = msg.Content
-		}
-
-		// Add metadata if present (excluding tool-related fields already handled)
-		if len(msg.Metadata) > 0 {
-			for k, v := range msg.Metadata {
-				if k != "tool_calls" && k != "tool_call_id" {
-					message[k] = v
-				}
-			}
-		}
-
-		request["messages"] = append(request["messages"].([]map[string]interface{}), message)
-	}
+	request["messages"] = p.buildOpenAIMessages(messages, options)
 
 	// Handle tools
 	if tools, ok := options["tools"].([]utils.Tool); ok && len(tools) > 0 {

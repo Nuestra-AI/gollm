@@ -494,6 +494,9 @@ func (p *OpenAIResponsesProvider) parseResponseInternal(body []byte) (string, *t
 			}
 
 		case "function_call":
+			// Preserve structured tool call data on ResponseDetails
+			details.ToolCalls = append(details.ToolCalls, types.NewToolCall(item.CallID, item.Name, json.RawMessage(item.Arguments)))
+
 			var args interface{}
 			if item.Arguments != "" {
 				if err := json.Unmarshal([]byte(item.Arguments), &args); err != nil {

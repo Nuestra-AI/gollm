@@ -350,6 +350,9 @@ func (p *CohereProvider) ParseResponseWithUsage(body []byte) (string, *types.Res
 	}
 
 	for _, toolCall := range response.Message.ToolCalls {
+		// Preserve structured tool call data on ResponseDetails
+		details.ToolCalls = append(details.ToolCalls, types.NewToolCall(toolCall.ID, toolCall.Function.Name, json.RawMessage(toolCall.Function.Arguments)))
+
 		// Parse arguments as raw JSON to preserve the exact format
 		var args interface{}
 		if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &args); err != nil {

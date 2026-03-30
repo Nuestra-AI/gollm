@@ -16,6 +16,22 @@ type ToolCall struct {
 	} `json:"function"`
 }
 
+// NewToolCall creates a ToolCall with the given id, function name, and arguments.
+// Type is always set to "function" (the only type currently used by providers).
+func NewToolCall(id, name string, arguments json.RawMessage) ToolCall {
+	return ToolCall{
+		ID:   id,
+		Type: "function",
+		Function: struct {
+			Name      string          `json:"name"`
+			Arguments json.RawMessage `json:"arguments"`
+		}{
+			Name:      name,
+			Arguments: arguments,
+		},
+	}
+}
+
 // GetArguments parses the tool call arguments into a map.
 // Returns an error if the arguments cannot be parsed as JSON.
 func (tc *ToolCall) GetArguments() (map[string]interface{}, error) {

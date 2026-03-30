@@ -367,12 +367,18 @@ func (p *Prompt) hasStructuredMessages() bool {
 func promptMessagesToMemoryMessages(msgs []PromptMessage) []types.MemoryMessage {
 	out := make([]types.MemoryMessage, len(msgs))
 	for i, m := range msgs {
+		// Build tool calls via NewToolCall to ensure Type defaults to "function"
+		// without mutating the original PromptMessage data.
+		var toolCalls []types.ToolCall
+		for _, tc := range m.ToolCalls {
+			toolCalls = append(toolCalls, types.NewToolCall(tc.ID, tc.Function.Name, tc.Function.Arguments))
+		}
 		out[i] = types.MemoryMessage{
 			Role:         m.Role,
 			Content:      m.Content,
 			MultiContent: m.MultiContent,
 			CacheControl: string(m.CacheType),
-			ToolCalls:    m.ToolCalls,
+			ToolCalls:    toolCalls,
 			ToolCallID:   m.ToolCallID,
 		}
 	}
