@@ -399,7 +399,7 @@ func (p *OpenAIProvider) PrepareRequestWithSchema(prompt string, options map[str
 	// Handle system prompt as system message
 	if systemPrompt, ok := options["system_prompt"].(string); ok && systemPrompt != "" {
 		request["messages"] = append([]map[string]interface{}{
-			{"role": "system", "content": systemPrompt},
+			{"role": "developer", "content": systemPrompt},
 		}, request["messages"].([]map[string]interface{})...)
 	}
 
@@ -1012,7 +1012,7 @@ func (p *OpenAIProvider) buildOpenAIMessages(messages []types.MemoryMessage, opt
 	// Handle system prompt as system message
 	if systemPrompt, ok := options["system_prompt"].(string); ok && systemPrompt != "" {
 		result = append(result, map[string]interface{}{
-			"role":    "system",
+			"role":    "developer",
 			"content": systemPrompt,
 		})
 	}
