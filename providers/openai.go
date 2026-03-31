@@ -527,12 +527,13 @@ func (p *OpenAIProvider) ParseResponse(body []byte) (string, error) {
 	}
 
 	message := response.Choices[0].Message
+
+	var parts []string
 	if message.Content != "" {
-		return message.Content, nil
+		parts = append(parts, message.Content)
 	}
 
 	if len(message.ToolCalls) > 0 {
-		var functionCalls []string
 		for _, call := range message.ToolCalls {
 			// Parse arguments as raw JSON to preserve the exact format
 			var args interface{}
@@ -544,12 +545,15 @@ func (p *OpenAIProvider) ParseResponse(body []byte) (string, error) {
 			if err != nil {
 				return "", fmt.Errorf("error formatting function call: %w", err)
 			}
-			functionCalls = append(functionCalls, functionCall)
+			parts = append(parts, functionCall)
 		}
-		return strings.Join(functionCalls, "\n"), nil
 	}
 
-	return "", fmt.Errorf("no content or tool calls in response")
+	if len(parts) == 0 {
+		return "", fmt.Errorf("no content or tool calls in response")
+	}
+
+	return strings.Join(parts, "\n"), nil
 }
 
 // ParseResponseWithUsage extracts both the generated text and response details from the OpenAI API response.
@@ -708,12 +712,13 @@ func (p *OpenAIProvider) ParseResponseWithUsage(body []byte) (string, *types.Res
 	}
 
 	message := response.Choices[0].Message
+
+	var parts []string
 	if message.Content != "" {
-		return message.Content, details, nil
+		parts = append(parts, message.Content)
 	}
 
 	if len(message.ToolCalls) > 0 {
-		var functionCalls []string
 		for _, call := range message.ToolCalls {
 			// Preserve structured tool call data on ResponseDetails
 			details.ToolCalls = append(details.ToolCalls, types.NewToolCall(call.ID, call.Function.Name, call.Function.Arguments))
@@ -728,12 +733,15 @@ func (p *OpenAIProvider) ParseResponseWithUsage(body []byte) (string, *types.Res
 			if err != nil {
 				return "", nil, fmt.Errorf("error formatting function call: %w", err)
 			}
-			functionCalls = append(functionCalls, functionCall)
+			parts = append(parts, functionCall)
 		}
-		return strings.Join(functionCalls, "\n"), details, nil
 	}
 
-	return "", nil, fmt.Errorf("no content or tool calls in response")
+	if len(parts) == 0 {
+		return "", nil, fmt.Errorf("no content or tool calls in response")
+	}
+
+	return strings.Join(parts, "\n"), details, nil
 }
 
 // parseWebSearchResponse handles the Responses API format which includes web_search_call items.

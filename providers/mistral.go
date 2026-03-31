@@ -210,16 +210,18 @@ func (p *MistralProvider) ParseResponse(body []byte) (string, error) {
 		return "", fmt.Errorf("error parsing response: %w", err)
 	}
 
-	if len(response.Choices) == 0 || response.Choices[0].Message.Content == "" {
+	if len(response.Choices) == 0 {
 		return "", fmt.Errorf("empty response from API")
 	}
 
-	// Combine content and tool calls
-	var finalResponse strings.Builder
-	finalResponse.WriteString(response.Choices[0].Message.Content)
+	message := response.Choices[0].Message
+	var parts []string
+	if message.Content != "" {
+		parts = append(parts, message.Content)
+	}
 
 	// Process tool calls if present
-	for _, toolCall := range response.Choices[0].Message.ToolCalls {
+	for _, toolCall := range message.ToolCalls {
 		// Parse arguments as raw JSON to preserve the exact format
 		var args interface{}
 		if err := json.Unmarshal(toolCall.Function.Arguments, &args); err != nil {
@@ -230,13 +232,14 @@ func (p *MistralProvider) ParseResponse(body []byte) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("error formatting function call: %w", err)
 		}
-		if finalResponse.Len() > 0 {
-			finalResponse.WriteString("\n")
-		}
-		finalResponse.WriteString(functionCall)
+		parts = append(parts, functionCall)
 	}
 
-	return finalResponse.String(), nil
+	if len(parts) == 0 {
+		return "", fmt.Errorf("no content or tool calls in response")
+	}
+
+	return strings.Join(parts, "\n"), nil
 }
 
 // ParseResponseWithUsage extracts both the generated text and response details from the Mistral API response.
@@ -276,7 +279,7 @@ func (p *MistralProvider) ParseResponseWithUsage(body []byte) (string, *types.Re
 		return "", nil, fmt.Errorf("error parsing response: %w", err)
 	}
 
-	if len(response.Choices) == 0 || response.Choices[0].Message.Content == "" {
+	if len(response.Choices) == 0 {
 		return "", nil, fmt.Errorf("empty response from API")
 	}
 
@@ -291,12 +294,14 @@ func (p *MistralProvider) ParseResponseWithUsage(body []byte) (string, *types.Re
 		},
 	}
 
-	// Combine content and tool calls
-	var finalResponse strings.Builder
-	finalResponse.WriteString(response.Choices[0].Message.Content)
+	message := response.Choices[0].Message
+	var parts []string
+	if message.Content != "" {
+		parts = append(parts, message.Content)
+	}
 
 	// Process tool calls if present
-	for _, toolCall := range response.Choices[0].Message.ToolCalls {
+	for _, toolCall := range message.ToolCalls {
 		// Preserve structured tool call data on ResponseDetails
 		details.ToolCalls = append(details.ToolCalls, types.NewToolCall(toolCall.ID, toolCall.Function.Name, toolCall.Function.Arguments))
 
@@ -310,13 +315,14 @@ func (p *MistralProvider) ParseResponseWithUsage(body []byte) (string, *types.Re
 		if err != nil {
 			return "", nil, fmt.Errorf("error formatting function call: %w", err)
 		}
-		if finalResponse.Len() > 0 {
-			finalResponse.WriteString("\n")
-		}
-		finalResponse.WriteString(functionCall)
+		parts = append(parts, functionCall)
 	}
 
-	return finalResponse.String(), details, nil
+	if len(parts) == 0 {
+		return "", nil, fmt.Errorf("no content or tool calls in response")
+	}
+
+	return strings.Join(parts, "\n"), details, nil
 }
 
 // HandleFunctionCalls processes structured output in the response.

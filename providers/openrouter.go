@@ -349,7 +349,15 @@ func (p *OpenRouterProvider) ParseResponse(body []byte) (string, error) {
 	var chatResp struct {
 		Choices []struct {
 			Message struct {
-				Content string `json:"content"`
+				Content   string `json:"content"`
+				ToolCalls []struct {
+					ID       string `json:"id"`
+					Type     string `json:"type"`
+					Function struct {
+						Name      string          `json:"name"`
+						Arguments json.RawMessage `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
 			} `json:"message"`
 			FinishReason       string `json:"finish_reason"`
 			NativeFinishReason string `json:"native_finish_reason"`
@@ -364,8 +372,8 @@ func (p *OpenRouterProvider) ParseResponse(body []byte) (string, error) {
 	// Try to parse as a chat completion
 	chatErr := json.Unmarshal(body, &chatResp)
 
-	// Check if we have valid chat completion choices
-	if chatErr == nil && len(chatResp.Choices) > 0 && chatResp.Choices[0].Message.Content != "" {
+	// Check if we have valid chat completion choices (content or tool calls)
+	if chatErr == nil && len(chatResp.Choices) > 0 && (chatResp.Choices[0].Message.Content != "" || len(chatResp.Choices[0].Message.ToolCalls) > 0) {
 		// This is a chat completion response
 
 		// Check for errors
@@ -381,7 +389,27 @@ func (p *OpenRouterProvider) ParseResponse(body []byte) (string, error) {
 			p.logger.Info("Model used", "requested", p.model, "actual", chatResp.Model)
 		}
 
-		return chatResp.Choices[0].Message.Content, nil
+		message := chatResp.Choices[0].Message
+		var parts []string
+		if message.Content != "" {
+			parts = append(parts, message.Content)
+		}
+
+		if len(message.ToolCalls) > 0 {
+			for _, call := range message.ToolCalls {
+				var args interface{}
+				if err := json.Unmarshal(call.Function.Arguments, &args); err != nil {
+					return "", fmt.Errorf("error parsing function arguments: %w", err)
+				}
+				functionCall, err := utils.FormatFunctionCall(call.Function.Name, args)
+				if err != nil {
+					return "", fmt.Errorf("error formatting function call: %w", err)
+				}
+				parts = append(parts, functionCall)
+			}
+		}
+
+		return strings.Join(parts, "\n"), nil
 	}
 
 	// If it wasn't a valid chat completion, try parsing as a text completion
@@ -440,7 +468,15 @@ func (p *OpenRouterProvider) ParseResponseWithUsage(body []byte) (string, *types
 	var chatResp struct {
 		Choices []struct {
 			Message struct {
-				Content string `json:"content"`
+				Content   string `json:"content"`
+				ToolCalls []struct {
+					ID       string `json:"id"`
+					Type     string `json:"type"`
+					Function struct {
+						Name      string          `json:"name"`
+						Arguments json.RawMessage `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
 			} `json:"message"`
 			FinishReason       string `json:"finish_reason"`
 			NativeFinishReason string `json:"native_finish_reason"`
@@ -460,8 +496,8 @@ func (p *OpenRouterProvider) ParseResponseWithUsage(body []byte) (string, *types
 	// Try to parse as a chat completion
 	chatErr := json.Unmarshal(body, &chatResp)
 
-	// Check if we have valid chat completion choices
-	if chatErr == nil && len(chatResp.Choices) > 0 && chatResp.Choices[0].Message.Content != "" {
+	// Check if we have valid chat completion choices (content or tool calls)
+	if chatErr == nil && len(chatResp.Choices) > 0 && (chatResp.Choices[0].Message.Content != "" || len(chatResp.Choices[0].Message.ToolCalls) > 0) {
 		// This is a chat completion response
 
 		// Check for errors
@@ -487,7 +523,29 @@ func (p *OpenRouterProvider) ParseResponseWithUsage(body []byte) (string, *types
 			},
 		}
 
-		return chatResp.Choices[0].Message.Content, details, nil
+		message := chatResp.Choices[0].Message
+		var parts []string
+		if message.Content != "" {
+			parts = append(parts, message.Content)
+		}
+
+		if len(message.ToolCalls) > 0 {
+			for _, call := range message.ToolCalls {
+				details.ToolCalls = append(details.ToolCalls, types.NewToolCall(call.ID, call.Function.Name, call.Function.Arguments))
+
+				var args interface{}
+				if err := json.Unmarshal(call.Function.Arguments, &args); err != nil {
+					return "", nil, fmt.Errorf("error parsing function arguments: %w", err)
+				}
+				functionCall, err := utils.FormatFunctionCall(call.Function.Name, args)
+				if err != nil {
+					return "", nil, fmt.Errorf("error formatting function call: %w", err)
+				}
+				parts = append(parts, functionCall)
+			}
+		}
+
+		return strings.Join(parts, "\n"), details, nil
 	}
 
 	// If it wasn't a valid chat completion, try parsing as a text completion

@@ -4,6 +4,7 @@ package providers
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/teilomillet/gollm/config"
 	"github.com/teilomillet/gollm/types"
@@ -179,7 +180,15 @@ func (p *GroqProvider) ParseResponse(body []byte) (string, error) {
 	var response struct {
 		Choices []struct {
 			Message struct {
-				Content string `json:"content"`
+				Content   string `json:"content"`
+				ToolCalls []struct {
+					ID       string `json:"id"`
+					Type     string `json:"type"`
+					Function struct {
+						Name      string          `json:"name"`
+						Arguments json.RawMessage `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
 			} `json:"message"`
 		} `json:"choices"`
 	}
@@ -189,11 +198,35 @@ func (p *GroqProvider) ParseResponse(body []byte) (string, error) {
 		return "", fmt.Errorf("error parsing response: %w", err)
 	}
 
-	if len(response.Choices) == 0 || response.Choices[0].Message.Content == "" {
+	if len(response.Choices) == 0 {
 		return "", fmt.Errorf("empty response from API")
 	}
 
-	return response.Choices[0].Message.Content, nil
+	message := response.Choices[0].Message
+	var parts []string
+	if message.Content != "" {
+		parts = append(parts, message.Content)
+	}
+
+	if len(message.ToolCalls) > 0 {
+		for _, call := range message.ToolCalls {
+			var args interface{}
+			if err := json.Unmarshal(call.Function.Arguments, &args); err != nil {
+				return "", fmt.Errorf("error parsing function arguments: %w", err)
+			}
+			functionCall, err := utils.FormatFunctionCall(call.Function.Name, args)
+			if err != nil {
+				return "", fmt.Errorf("error formatting function call: %w", err)
+			}
+			parts = append(parts, functionCall)
+		}
+	}
+
+	if len(parts) == 0 {
+		return "", fmt.Errorf("no content or tool calls in response")
+	}
+
+	return strings.Join(parts, "\n"), nil
 }
 
 // ParseResponseWithUsage extracts both the generated text and response details from the Groq API response.
@@ -212,7 +245,15 @@ func (p *GroqProvider) ParseResponseWithUsage(body []byte) (string, *types.Respo
 		Model   string `json:"model"`
 		Choices []struct {
 			Message struct {
-				Content string `json:"content"`
+				Content   string `json:"content"`
+				ToolCalls []struct {
+					ID       string `json:"id"`
+					Type     string `json:"type"`
+					Function struct {
+						Name      string          `json:"name"`
+						Arguments json.RawMessage `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
 			} `json:"message"`
 		} `json:"choices"`
 		Usage struct {
@@ -227,7 +268,7 @@ func (p *GroqProvider) ParseResponseWithUsage(body []byte) (string, *types.Respo
 		return "", nil, fmt.Errorf("error parsing response: %w", err)
 	}
 
-	if len(response.Choices) == 0 || response.Choices[0].Message.Content == "" {
+	if len(response.Choices) == 0 {
 		return "", nil, fmt.Errorf("empty response from API")
 	}
 
@@ -242,7 +283,33 @@ func (p *GroqProvider) ParseResponseWithUsage(body []byte) (string, *types.Respo
 		},
 	}
 
-	return response.Choices[0].Message.Content, details, nil
+	message := response.Choices[0].Message
+	var parts []string
+	if message.Content != "" {
+		parts = append(parts, message.Content)
+	}
+
+	if len(message.ToolCalls) > 0 {
+		for _, call := range message.ToolCalls {
+			details.ToolCalls = append(details.ToolCalls, types.NewToolCall(call.ID, call.Function.Name, call.Function.Arguments))
+
+			var args interface{}
+			if err := json.Unmarshal(call.Function.Arguments, &args); err != nil {
+				return "", nil, fmt.Errorf("error parsing function arguments: %w", err)
+			}
+			functionCall, err := utils.FormatFunctionCall(call.Function.Name, args)
+			if err != nil {
+				return "", nil, fmt.Errorf("error formatting function call: %w", err)
+			}
+			parts = append(parts, functionCall)
+		}
+	}
+
+	if len(parts) == 0 {
+		return "", nil, fmt.Errorf("no content or tool calls in response")
+	}
+
+	return strings.Join(parts, "\n"), details, nil
 }
 
 // HandleFunctionCalls processes function calling capabilities.
