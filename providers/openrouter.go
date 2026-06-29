@@ -2,8 +2,10 @@
 package providers
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/teilomillet/gollm/config"
@@ -211,6 +213,9 @@ func (p *OpenRouterProvider) PrepareRequest(prompt string, options map[string]in
 		// OpenRouter handles caching automatically for supported providers
 		delete(req, "enable_prompt_caching")
 	}
+
+	// stream_usage is a gollm control key (see streamIncludeUsage); never wire it.
+	delete(req, "stream_usage")
 
 	return json.Marshal(req)
 }
@@ -672,7 +677,142 @@ func (p *OpenRouterProvider) PrepareStreamRequest(prompt string, options map[str
 		streamOptions[k] = v
 	}
 	streamOptions["stream"] = true
+	// Request a trailing usage chunk (gated by the shared "stream_usage" option).
+	if streamIncludeUsage(streamOptions) {
+		streamOptions["usage"] = map[string]interface{}{"include": true}
+	}
 	return p.PrepareRequest(prompt, streamOptions)
+}
+
+// PrepareStreamRequestWithMessages preserves structured (system + multi-turn)
+// messages instead of flattening to one user turn: it reuses
+// PrepareRequestWithMessages and enables streaming + usage accounting.
+func (p *OpenRouterProvider) PrepareStreamRequestWithMessages(messages []types.MemoryMessage, options map[string]interface{}) ([]byte, error) {
+	streamOptions := make(map[string]interface{}, len(options)+2)
+	for k, v := range options {
+		streamOptions[k] = v
+	}
+	streamOptions["stream"] = true
+	if streamIncludeUsage(streamOptions) {
+		streamOptions["usage"] = map[string]interface{}{"include": true}
+	}
+
+	// PrepareRequestWithMessages doesn't inject system_prompt, so prepend it as a
+	// leading system message. Resolve from the per-call options or a provider-level
+	// default (p.options), preferring the per-call value.
+	sp, ok := streamOptions["system_prompt"].(string)
+	if !ok || sp == "" {
+		sp, _ = p.options["system_prompt"].(string)
+	}
+	if sp != "" {
+		messages = append([]types.MemoryMessage{{Role: "system", Content: sp}}, messages...)
+	}
+	delete(streamOptions, "system_prompt")
+
+	body, err := p.PrepareRequestWithMessages(messages, streamOptions)
+	if err != nil {
+		return nil, err
+	}
+	// PrepareRequestWithMessages may re-merge system_prompt from p.options as a raw
+	// field; strip it so the control key never reaches the wire.
+	var requestBody map[string]interface{}
+	if err := json.Unmarshal(body, &requestBody); err != nil {
+		return nil, err
+	}
+	if _, leaked := requestBody["system_prompt"]; !leaked {
+		return body, nil
+	}
+	delete(requestBody, "system_prompt")
+	return json.Marshal(requestBody)
+}
+
+// ParseStreamResponseRich parses OpenRouter's OpenAI-compatible stream: text on
+// delta.content, tool calls on delta.tool_calls, finish_reason, and a trailing
+// usage object; [DONE] ends the stream.
+func (p *OpenRouterProvider) ParseStreamResponseRich(chunk []byte) (types.StreamChunk, error) {
+	trimmed := bytes.TrimSpace(chunk)
+	if len(trimmed) == 0 {
+		return types.StreamChunk{}, types.ErrStreamSkip
+	}
+	if bytes.Equal(trimmed, []byte("[DONE]")) {
+		return types.StreamChunk{}, io.EOF
+	}
+
+	var resp struct {
+		Choices []struct {
+			Delta struct {
+				Content   string `json:"content"`
+				ToolCalls []struct {
+					Index    int    `json:"index"`
+					ID       string `json:"id"`
+					Type     string `json:"type"`
+					Function struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"delta"`
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+		Usage *struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
+		} `json:"usage"`
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(trimmed, &resp); err != nil {
+		return types.StreamChunk{}, fmt.Errorf("malformed response: %w", err)
+	}
+	if resp.Error.Message != "" {
+		return types.StreamChunk{}, fmt.Errorf("OpenRouter API streaming error: %s", resp.Error.Message)
+	}
+
+	usage := func() *types.TokenUsage {
+		if resp.Usage == nil {
+			return nil
+		}
+		return &types.TokenUsage{
+			PromptTokens:     resp.Usage.PromptTokens,
+			CompletionTokens: resp.Usage.CompletionTokens,
+			TotalTokens:      resp.Usage.TotalTokens,
+		}
+	}
+
+	if len(resp.Choices) > 0 {
+		choice := resp.Choices[0]
+		// Tool-call fragment: opening delta carries id+name, later deltas carry
+		// partial-JSON argument pieces (one tool_calls entry per chunk).
+		if len(choice.Delta.ToolCalls) > 0 {
+			deltas := make([]*types.ToolCallDelta, len(choice.Delta.ToolCalls))
+			for i, tc := range choice.Delta.ToolCalls {
+				deltas[i] = &types.ToolCallDelta{
+					Index:        tc.Index,
+					ID:           tc.ID,
+					Name:         tc.Function.Name,
+					ArgsFragment: tc.Function.Arguments,
+				}
+			}
+			return types.StreamChunk{Kind: "tool_call_delta", ToolCallDelta: deltas[0], ExtraToolCallDeltas: deltas[1:]}, nil
+		}
+		if choice.Delta.Content != "" {
+			return types.StreamChunk{Kind: "text", Text: choice.Delta.Content}, nil
+		}
+		// Finish reason does not end the stream — a usage chunk and [DONE] follow.
+		// Attach usage if this same chunk also carries it.
+		if choice.FinishReason != "" {
+			return types.StreamChunk{Kind: "finish", FinishReason: choice.FinishReason, Usage: usage()}, nil
+		}
+	}
+
+	// Trailing usage-only chunk (choices empty or delta carried nothing).
+	if u := usage(); u != nil {
+		return types.StreamChunk{Kind: "usage", Usage: u}, nil
+	}
+
+	return types.StreamChunk{}, types.ErrStreamSkip
 }
 
 // ParseStreamResponse processes a chunk from a streaming OpenRouter response.
@@ -851,6 +991,9 @@ func (p *OpenRouterProvider) PrepareRequestWithMessages(messages []types.MemoryM
 	// Remove prompt caching flag as it's been handled
 	delete(req, "enable_prompt_caching")
 
+	// stream_usage is a gollm control key (see streamIncludeUsage); never wire it.
+	delete(req, "stream_usage")
+
 	// Add streaming if requested
 	if stream, ok := req["stream"].(bool); ok && stream {
 		req["stream"] = true
@@ -872,4 +1015,3 @@ func (p *OpenRouterProvider) PrepareRequestWithMessagesAndSchema(messages []type
 	}
 	return p.PrepareRequestWithMessages(messages, newOptions)
 }
-
