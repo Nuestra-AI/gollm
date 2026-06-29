@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -209,10 +210,16 @@ func (l *LLMImpl) Generate(ctx context.Context, prompt *Prompt, opts ...Generate
 // wait implements a cancellable delay between retry attempts.
 // Returns context.Canceled if the context is cancelled during the wait.
 func (l *LLMImpl) wait(ctx context.Context) error {
+	return l.waitFor(ctx, l.RetryDelay)
+}
+
+// waitFor implements a cancellable delay of the given duration.
+// Returns the context error if the context is cancelled during the wait.
+func (l *LLMImpl) waitFor(ctx context.Context, d time.Duration) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case <-time.After(l.RetryDelay):
+	case <-time.After(d):
 		return nil
 	}
 }
@@ -241,8 +248,8 @@ func (l *LLMImpl) attemptGenerate(ctx context.Context, prompt *Prompt) (string, 
 	if len(prompt.Tools) > 0 {
 		options["tools"] = prompt.Tools
 	}
-	if len(prompt.ToolChoice) > 0 {
-		options["tool_choice"] = prompt.ToolChoice
+	if tc, ok := toolChoiceValue(prompt.ToolChoice); ok {
+		options["tool_choice"] = tc
 	}
 
 	// Add Images to options for vision-capable models
@@ -487,8 +494,8 @@ func (l *LLMImpl) attemptGenerateWithUsage(ctx context.Context, prompt *Prompt) 
 	if len(prompt.Tools) > 0 {
 		options["tools"] = prompt.Tools
 	}
-	if len(prompt.ToolChoice) > 0 {
-		options["tool_choice"] = prompt.ToolChoice
+	if tc, ok := toolChoiceValue(prompt.ToolChoice); ok {
+		options["tool_choice"] = tc
 	}
 
 	var reqBody []byte
@@ -590,8 +597,8 @@ func (l *LLMImpl) prepareSchemaRequestBody(prompt *Prompt, schema interface{}) (
 	if len(prompt.Tools) > 0 {
 		options["tools"] = prompt.Tools
 	}
-	if len(prompt.ToolChoice) > 0 {
-		options["tool_choice"] = prompt.ToolChoice
+	if tc, ok := toolChoiceValue(prompt.ToolChoice); ok {
+		options["tool_choice"] = tc
 	}
 
 	// Add Images to options for vision-capable models
@@ -763,7 +770,8 @@ func (l *LLMImpl) Stream(ctx context.Context, prompt *Prompt, opts ...StreamOpti
 
 	// Apply stream options
 	config := &StreamConfig{
-		BufferSize: 100,
+		BufferSize:  100,
+		MaxLineSize: DefaultSSEMaxLineSize,
 		RetryStrategy: &DefaultRetryStrategy{
 			MaxRetries:  l.MaxRetries,
 			InitialWait: l.RetryDelay,
@@ -783,32 +791,85 @@ func (l *LLMImpl) Stream(ctx context.Context, prompt *Prompt, opts ...StreamOpti
 	l.optionsMutex.RUnlock()
 	options["stream"] = true
 
-	body, err := l.Provider.PrepareStreamRequest(prompt.String(), options)
+	// Carry tool/function definitions, tool choice, and images into the streaming
+	// request the same way the non-stream path does (see GenerateWithUsage and
+	// attemptGenerate). Without this, providers never receive the tools and can't
+	// emit tool-call deltas, can't honor a forced tool_choice, and drop image
+	// inputs for vision models.
+	if len(prompt.Tools) > 0 {
+		options["tools"] = prompt.Tools
+	}
+	if tc, ok := toolChoiceValue(prompt.ToolChoice); ok {
+		options["tool_choice"] = tc
+	}
+	if prompt.HasImages() {
+		options["images"] = prompt.Images
+	}
+
+	// Preserve multi-turn + system structure when the provider supports it.
+	// PrepareStreamRequest otherwise flattens the whole prompt into a single user
+	// turn (via Prompt.String()), losing roles and prior messages. Providers that
+	// implement the optional streamMessagesPreparer take the structured path; the
+	// rest fall back to the flattened request unchanged.
+	type streamMessagesPreparer interface {
+		PrepareStreamRequestWithMessages(messages []types.MemoryMessage, options map[string]interface{}) ([]byte, error)
+	}
+
+	var body []byte
+	var err error
+	if smp, ok := l.Provider.(streamMessagesPreparer); ok && prompt.hasStructuredMessages() {
+		if prompt.SystemPrompt != "" {
+			options["system_prompt"] = prompt.SystemPrompt
+		}
+		messages := promptMessagesToMemoryMessages(prompt.Messages)
+		body, err = smp.PrepareStreamRequestWithMessages(messages, options)
+	} else {
+		body, err = l.Provider.PrepareStreamRequest(prompt.String(), options)
+	}
 	if err != nil {
 		return nil, NewLLMError(ErrorTypeRequest, "failed to prepare stream request", err)
 	}
 
-	// Create request
-	req, err := http.NewRequestWithContext(ctx, "POST", l.Provider.Endpoint(), bytes.NewReader(body))
-	if err != nil {
-		return nil, NewLLMError(ErrorTypeRequest, "failed to create stream request", err)
-	}
+	// Retry establishment only (no tokens produced yet, so re-issuing is safe).
+	// Once data flows, errors are surfaced by Next — chat streams can't resume.
+	retry := config.RetryStrategy
+	var resp *http.Response
+	for {
+		req, err := http.NewRequestWithContext(ctx, "POST", l.Provider.Endpoint(), bytes.NewReader(body))
+		if err != nil {
+			return nil, NewLLMError(ErrorTypeRequest, "failed to create stream request", err)
+		}
+		for k, v := range l.Provider.Headers() {
+			req.Header.Set(k, v)
+		}
 
-	// Add headers
-	for k, v := range l.Provider.Headers() {
-		req.Header.Set(k, v)
-	}
+		l.logger.Wire("Full API request", "method", req.Method, "url", req.URL.String(), "headers", utils.RedactHTTPHeaders(req.Header), "body", string(body))
+		resp, err = l.client.Do(req)
+		if err == nil && resp.StatusCode == http.StatusOK {
+			break
+		}
 
-	// Make request
-	l.logger.Wire("Full API request", "method", req.Method, "url", req.URL.String(), "headers", utils.RedactHTTPHeaders(req.Header), "body", string(body))
-	resp, err := l.client.Do(req)
-	if err != nil {
-		return nil, NewLLMError(ErrorTypeAPI, "failed to make stream request", err)
-	}
+		// Retry only transient failures (transport, 408/429/5xx); fail fast on
+		// other 4xx so a permanent error isn't masked as a slow one.
+		var streamErr error
+		var transient bool
+		if err != nil {
+			streamErr = NewLLMError(ErrorTypeAPI, "failed to make stream request", err)
+			transient = true
+		} else {
+			code := resp.StatusCode
+			resp.Body.Close()
+			streamErr = NewLLMError(ErrorTypeAPI, fmt.Sprintf("API error: status code %d", code), nil)
+			transient = code == http.StatusRequestTimeout || code == http.StatusTooManyRequests || code >= 500
+		}
 
-	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
-		return nil, NewLLMError(ErrorTypeAPI, fmt.Sprintf("API error: status code %d", resp.StatusCode), nil)
+		if !transient || retry == nil || !retry.ShouldRetry(streamErr) {
+			return nil, streamErr
+		}
+		l.logger.Warn("Stream establishment failed, retrying", "error", streamErr)
+		if werr := l.waitFor(ctx, retry.NextDelay()); werr != nil {
+			return nil, werr
+		}
 	}
 
 	// Create and return stream
@@ -820,14 +881,22 @@ func (l *LLMImpl) SupportsStreaming() bool {
 	return l.Provider.SupportsStreaming()
 }
 
+// richStreamParser is the optional capability that lets a provider surface token
+// usage and finish/stop reasons during streaming (not just text). Providers that
+// don't implement it fall back to the text-only ParseStreamResponse path.
+type richStreamParser interface {
+	ParseStreamResponseRich(chunk []byte) (types.StreamChunk, error)
+}
+
 // providerStream implements TokenStream for a specific provider
 type providerStream struct {
-	decoder       StreamDecoder
-	provider      providers.Provider
-	config        *StreamConfig
-	buffer        []byte
-	currentIndex  int
-	retryStrategy RetryStrategy
+	decoder          StreamDecoder
+	provider         providers.Provider
+	closer           io.Closer // underlying response body; closed by Close()
+	config           *StreamConfig
+	currentIndex     int
+	usage            types.TokenUsage       // running total, merged across chunks (see mergeUsage)
+	pendingToolCalls []*types.ToolCallDelta // extra parallel tool-call fragments, drained one per Next
 }
 
 func newProviderStream(reader io.ReadCloser, provider providers.Provider, config *StreamConfig) *providerStream {
@@ -835,31 +904,64 @@ func newProviderStream(reader io.ReadCloser, provider providers.Provider, config
 	if provider.Name() == "ollama" {
 		decoder = NewNDJSONDecoder(reader)
 	} else {
-		decoder = NewSSEDecoder(reader)
+		decoder = NewSSEDecoderWithLimit(reader, config.MaxLineSize)
 	}
 
 	return &providerStream{
-		decoder:       decoder,
-		provider:      provider,
-		config:        config,
-		buffer:        make([]byte, 0, 4096),
-		currentIndex:  0,
-		retryStrategy: config.RetryStrategy,
+		decoder:      decoder,
+		provider:     provider,
+		closer:       reader,
+		config:       config,
+		currentIndex: 0,
 	}
 }
 
+// mergeUsage overwrites dst per non-zero field. Providers report usage
+// cumulatively (Anthropic splits input/output across events), so taking the
+// latest non-zero value is correct and avoids double-counting.
+func mergeUsage(dst *types.TokenUsage, src types.TokenUsage) {
+	if src.PromptTokens > 0 {
+		dst.PromptTokens = src.PromptTokens
+	}
+	if src.CompletionTokens > 0 {
+		dst.CompletionTokens = src.CompletionTokens
+	}
+	if src.TotalTokens > 0 {
+		dst.TotalTokens = src.TotalTokens
+	}
+	if src.CacheCreationInputTokens > 0 {
+		dst.CacheCreationInputTokens = src.CacheCreationInputTokens
+	}
+	if src.CacheReadInputTokens > 0 {
+		dst.CacheReadInputTokens = src.CacheReadInputTokens
+	}
+}
+
+// toolCallToken builds a tool_call_delta StreamToken and advances the index.
+func (s *providerStream) toolCallToken(d *types.ToolCallDelta) *StreamToken {
+	tok := &StreamToken{Type: "tool_call_delta", Index: s.currentIndex, ToolCallDelta: d}
+	s.currentIndex++
+	return tok
+}
+
 func (s *providerStream) Next(ctx context.Context) (*StreamToken, error) {
+	rich, hasRich := s.provider.(richStreamParser)
 	for {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		default:
+			// Drain buffered parallel tool-call fragments first.
+			if len(s.pendingToolCalls) > 0 {
+				d := s.pendingToolCalls[0]
+				s.pendingToolCalls = s.pendingToolCalls[1:]
+				return s.toolCallToken(d), nil
+			}
+
 			if !s.decoder.Next() {
 				if err := s.decoder.Err(); err != nil {
-					if s.retryStrategy.ShouldRetry(err) {
-						time.Sleep(s.retryStrategy.NextDelay())
-						continue
-					}
+					// Surfaced to the caller; not retried in place (body is
+					// already partially consumed — re-invoke Stream to retry).
 					return nil, err
 				}
 				return nil, io.EOF
@@ -870,7 +972,56 @@ func (s *providerStream) Next(ctx context.Context) (*StreamToken, error) {
 				continue
 			}
 
-			// Process the event
+			// Rich path: providers that report usage/finish during streaming.
+			if hasRich {
+				chunk, err := rich.ParseStreamResponseRich(event.Data)
+				if err != nil {
+					if errors.Is(err, types.ErrStreamSkip) {
+						continue
+					}
+					if err == io.EOF {
+						return nil, io.EOF
+					}
+					// Genuine parse/API error — surface it instead of swallowing.
+					return nil, err
+				}
+				// Buffer any additional parallel tool-call fragments to emit next.
+				if len(chunk.ExtraToolCallDeltas) > 0 {
+					s.pendingToolCalls = append(s.pendingToolCalls, chunk.ExtraToolCallDeltas...)
+				}
+				kind := chunk.Kind
+				if kind == "" {
+					kind = "text"
+				}
+				token := &StreamToken{Text: chunk.Text, Type: kind, Index: s.currentIndex}
+				if chunk.ToolCallDelta != nil {
+					token.ToolCallDelta = chunk.ToolCallDelta
+				}
+				if chunk.Usage != nil {
+					mergeUsage(&s.usage, *chunk.Usage)
+				}
+				if chunk.Usage != nil || chunk.FinishReason != "" {
+					u := s.usage
+					total := u.TotalTokens
+					if total == 0 {
+						total = u.PromptTokens + u.CompletionTokens
+					}
+					token.Metadata = map[string]interface{}{
+						"prompt_tokens":               u.PromptTokens,
+						"completion_tokens":           u.CompletionTokens,
+						"total_tokens":                total,
+						"cache_creation_input_tokens": u.CacheCreationInputTokens,
+						"cache_read_input_tokens":     u.CacheReadInputTokens,
+					}
+					if chunk.FinishReason != "" {
+						token.Metadata["finish_reason"] = chunk.FinishReason
+					}
+				}
+				s.currentIndex++
+				return token, nil
+			}
+
+			// Text-only fallback for providers without rich parsing.
 			token, err := s.provider.ParseStreamResponse(event.Data)
 			if err != nil {
 				if err.Error() == "skip token" {
@@ -883,15 +1034,20 @@ func (s *providerStream) Next(ctx context.Context) (*StreamToken, error) {
 			}
 
 			// Create and return token
-			return &StreamToken{
+			tok := &StreamToken{
 				Text:  token,
 				Type:  event.Type,
 				Index: s.currentIndex,
-			}, nil
+			}
+			s.currentIndex++
+			return tok, nil
 		}
 	}
 }
 
 func (s *providerStream) Close() error {
+	if s.closer != nil {
+		return s.closer.Close()
+	}
 	return nil
 }

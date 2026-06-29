@@ -25,11 +25,14 @@ func NewGoogleProvider(apiKey, model string, extraHeaders map[string]string) Pro
 	provider := &GoogleProvider{
 		OpenAIProvider: *NewOpenAIProvider(apiKey, model, extraHeaders).(*OpenAIProvider),
 	}
+	// Gemini maps a "system"-role message to system_instruction and doesn't
+	// recognize OpenAI's "developer" role.
+	provider.systemRole = "system"
 
 	return provider
 }
 
- // Name returns "google-openai" as the provider identifier.
+// Name returns "google-openai" as the provider identifier.
 func (p *GoogleProvider) Name() string {
 	return "google-openai"
 }

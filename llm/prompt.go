@@ -362,6 +362,20 @@ func (p *Prompt) hasStructuredMessages() bool {
 	return msg.Role != "user" || msg.ToolCallID != "" || len(msg.ToolCalls) > 0
 }
 
+// toolChoiceValue extracts the strategy string from a ToolChoice map
+// (WithToolChoice stores {"type": <strategy>}). Providers read tool_choice as a
+// string — OpenAI uses it directly, Anthropic re-wraps it — so passing the raw
+// map silently fails their type assertion. Returns ("", false) if none is set.
+func toolChoiceValue(tc map[string]interface{}) (string, bool) {
+	if len(tc) == 0 {
+		return "", false
+	}
+	if t, ok := tc["type"].(string); ok && t != "" {
+		return t, true
+	}
+	return "", false
+}
+
 // promptMessagesToMemoryMessages converts a PromptMessage slice to a
 // types.MemoryMessage slice for use with Provider.PrepareRequestWithMessages.
 func promptMessagesToMemoryMessages(msgs []PromptMessage) []types.MemoryMessage {
