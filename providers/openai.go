@@ -1000,7 +1000,15 @@ func streamIncludeUsage(options map[string]interface{}) bool {
 // PrepareRequestWithMessages for parity and enables streaming + usage. Inherited
 // by Google and DeepSeek via embedding.
 func (p *OpenAIProvider) PrepareStreamRequestWithMessages(messages []types.MemoryMessage, options map[string]interface{}) ([]byte, error) {
-	includeUsage := streamIncludeUsage(options)
+	// Honor stream_usage from the per-call options, falling back to a
+	// provider-level default set via SetOption (mirrors the flattened path).
+	_, perCall := options["stream_usage"]
+	includeUsage := streamIncludeUsage(options) // consumes the per-call key
+	if !perCall {
+		if v, ok := p.options["stream_usage"].(bool); ok {
+			includeUsage = v
+		}
+	}
 	body, err := p.PrepareRequestWithMessages(messages, options)
 	if err != nil {
 		return nil, err
@@ -1114,8 +1122,9 @@ func (p *OpenAIProvider) ParseStreamResponseRich(chunk []byte) (types.StreamChun
 
 	choice := response.Choices[0]
 	// Tool-call fragment: the opening delta carries id+name, later deltas carry
-	// partial-JSON argument pieces. OpenAI streams one tool_calls entry per chunk
-	// (each with its own index), even for parallel calls.
+	// partial-JSON argument pieces. OpenAI typically streams one tool_calls entry
+	// per chunk (each with its own index), but a chunk may carry several; the
+	// extras beyond the first are returned as ExtraToolCallDeltas.
 	if len(choice.Delta.ToolCalls) > 0 {
 		deltas := make([]*types.ToolCallDelta, len(choice.Delta.ToolCalls))
 		for i, tc := range choice.Delta.ToolCalls {

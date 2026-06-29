@@ -124,6 +124,35 @@ func TestStreamUsageOption(t *testing.T) {
 	}
 }
 
+// A provider-level stream_usage default (set via SetOption, not passed per call)
+// must be honored on the structured streaming path, matching the flattened path.
+func TestStreamUsageProviderDefault(t *testing.T) {
+	p := NewOpenAIProvider("k", "gpt-4o-mini", nil)
+	p.SetOption("stream_usage", false) // provider-level default, no per-call option
+
+	sp := p.(streamWithMessages)
+	msgs, _ := structuredFixture()
+	body, err := sp.PrepareStreamRequestWithMessages(msgs, map[string]interface{}{})
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	var b struct {
+		StreamOptions *struct {
+			IncludeUsage bool `json:"include_usage"`
+		} `json:"stream_options"`
+		StreamUsage *bool `json:"stream_usage"`
+	}
+	if err := json.Unmarshal(body, &b); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if b.StreamOptions != nil {
+		t.Errorf("provider-level stream_usage=false ignored: got stream_options %+v", b.StreamOptions)
+	}
+	if b.StreamUsage != nil {
+		t.Errorf("stream_usage control key leaked into body: %s", body)
+	}
+}
+
 // TestStreamSystemRole_GoogleVsOpenAI verifies the system prompt is emitted with
 // the role each endpoint understands: "developer" for OpenAI, "system" for
 // Google's OpenAI-compatible endpoint (which maps it to system_instruction).
