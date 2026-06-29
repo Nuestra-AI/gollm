@@ -25,6 +25,8 @@ func NewDeepSeekProvider(apiKey, model string, extraHeaders map[string]string) P
 	provider := &DeepSeekProvider{
 		OpenAIProvider: *NewOpenAIProvider(apiKey, model, extraHeaders).(*OpenAIProvider),
 	}
+	// DeepSeek uses the "system" role, not OpenAI's "developer" role.
+	provider.systemRole = "system"
 	// Override the endpoint
 	return provider
 }
