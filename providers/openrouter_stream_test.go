@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"io"
 	"testing"
+
+	"github.com/teilomillet/gollm/types"
 )
 
 func TestOpenRouterRichStream_TextUsageFinishTools(t *testing.T) {
@@ -120,5 +122,35 @@ func TestOpenRouterStreamUsageNoLeak(t *testing.T) {
 	}
 	if _, leaked := raw["stream_usage"]; leaked {
 		t.Errorf("stream_usage control key leaked into body: %s", body)
+	}
+}
+
+// A provider-level system_prompt default (set via SetOption, not passed per call)
+// must be injected as a leading system message and not leak as a raw field.
+func TestOpenRouterSystemPromptProviderDefault(t *testing.T) {
+	p := NewOpenRouterProvider("k", "openai/gpt-4o", nil)
+	p.SetOption("system_prompt", "You are a helpful assistant.")
+
+	sp := p.(streamWithMessages)
+	msgs := []types.MemoryMessage{{Role: "user", Content: "hi"}}
+	body, err := sp.PrepareStreamRequestWithMessages(msgs, map[string]interface{}{})
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	var req struct {
+		SystemPrompt *string `json:"system_prompt"`
+		Messages     []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if req.SystemPrompt != nil {
+		t.Errorf("provider-level system_prompt leaked as a raw field: %s", body)
+	}
+	if len(req.Messages) != 2 || req.Messages[0].Role != "system" {
+		t.Errorf("expected leading system message from provider default, got %+v", req.Messages)
 	}
 }

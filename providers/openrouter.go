@@ -698,13 +698,32 @@ func (p *OpenRouterProvider) PrepareStreamRequestWithMessages(messages []types.M
 	}
 
 	// PrepareRequestWithMessages doesn't inject system_prompt, so prepend it as a
-	// leading system message to preserve the system instruction.
-	if sp, ok := streamOptions["system_prompt"].(string); ok && sp != "" {
-		messages = append([]types.MemoryMessage{{Role: "system", Content: sp}}, messages...)
-		delete(streamOptions, "system_prompt")
+	// leading system message. Resolve from the per-call options or a provider-level
+	// default (p.options), preferring the per-call value.
+	sp, ok := streamOptions["system_prompt"].(string)
+	if !ok || sp == "" {
+		sp, _ = p.options["system_prompt"].(string)
 	}
+	if sp != "" {
+		messages = append([]types.MemoryMessage{{Role: "system", Content: sp}}, messages...)
+	}
+	delete(streamOptions, "system_prompt")
 
-	return p.PrepareRequestWithMessages(messages, streamOptions)
+	body, err := p.PrepareRequestWithMessages(messages, streamOptions)
+	if err != nil {
+		return nil, err
+	}
+	// PrepareRequestWithMessages may re-merge system_prompt from p.options as a raw
+	// field; strip it so the control key never reaches the wire.
+	var requestBody map[string]interface{}
+	if err := json.Unmarshal(body, &requestBody); err != nil {
+		return nil, err
+	}
+	if _, leaked := requestBody["system_prompt"]; !leaked {
+		return body, nil
+	}
+	delete(requestBody, "system_prompt")
+	return json.Marshal(requestBody)
 }
 
 // ParseStreamResponseRich parses OpenRouter's OpenAI-compatible stream: text on
