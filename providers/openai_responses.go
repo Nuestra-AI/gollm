@@ -41,8 +41,8 @@ func NewOpenAIResponsesProvider(apiKey, model string, extraHeaders map[string]st
 // Identity & config
 // ---------------------------------------------------------------------------
 
-func (p *OpenAIResponsesProvider) Name() string     { return "openai-responses" }
-func (p *OpenAIResponsesProvider) Endpoint() string  { return "https://api.openai.com/v1/responses" }
+func (p *OpenAIResponsesProvider) Name() string             { return "openai-responses" }
+func (p *OpenAIResponsesProvider) Endpoint() string         { return "https://api.openai.com/v1/responses" }
 func (p *OpenAIResponsesProvider) SupportsJSONSchema() bool { return true }
 func (p *OpenAIResponsesProvider) SupportsStreaming() bool  { return true }
 
@@ -727,10 +727,27 @@ func (p *OpenAIResponsesProvider) PrepareStreamRequest(prompt string, options ma
 	return json.Marshal(request)
 }
 
+// PrepareStreamRequestWithMessages preserves structured (system + multi-turn)
+// input instead of a flat string: it reuses PrepareRequestWithMessages and enables
+// streaming. The Responses API reports usage in its terminal event, so no
+// stream_options is needed.
+func (p *OpenAIResponsesProvider) PrepareStreamRequestWithMessages(messages []types.MemoryMessage, options map[string]interface{}) ([]byte, error) {
+	body, err := p.PrepareRequestWithMessages(messages, options)
+	if err != nil {
+		return nil, err
+	}
+	var request map[string]interface{}
+	if err := json.Unmarshal(body, &request); err != nil {
+		return nil, err
+	}
+	request["stream"] = true
+	return json.Marshal(request)
+}
+
 func (p *OpenAIResponsesProvider) ParseStreamResponse(chunk []byte) (string, error) {
 	trimmed := bytes.TrimSpace(chunk)
 	if len(trimmed) == 0 {
-		return "", fmt.Errorf("empty chunk")
+		return "", types.ErrStreamSkip
 	}
 
 	// Check for [DONE] marker
@@ -759,10 +776,116 @@ func (p *OpenAIResponsesProvider) ParseStreamResponse(chunk []byte) (string, err
 		if event.Delta != "" {
 			return event.Delta, nil
 		}
-		return "", fmt.Errorf("skip token")
+		return "", types.ErrStreamSkip
 	default:
 		// Other event types (response.created, response.in_progress, etc.)
-		return "", fmt.Errorf("skip token")
+		return "", types.ErrStreamSkip
+	}
+}
+
+// ParseStreamResponseRich adds usage + finish status. Usage rides the terminal
+// event (response.completed/.incomplete/.failed); there is no [DONE] sentinel, so
+// the stream ends when the SSE source closes after it.
+func (p *OpenAIResponsesProvider) ParseStreamResponseRich(chunk []byte) (types.StreamChunk, error) {
+	trimmed := bytes.TrimSpace(chunk)
+	if len(trimmed) == 0 {
+		return types.StreamChunk{}, types.ErrStreamSkip
+	}
+	if bytes.Equal(trimmed, []byte("[DONE]")) {
+		return types.StreamChunk{}, io.EOF
+	}
+
+	var event struct {
+		Type        string `json:"type"`
+		Delta       string `json:"delta"`
+		Message     string `json:"message"` // top-level "error" event
+		OutputIndex int    `json:"output_index"`
+		Item        struct {
+			Type      string `json:"type"`
+			ID        string `json:"id"`
+			CallID    string `json:"call_id"`
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		} `json:"item"`
+		Response struct {
+			Status string `json:"status"`
+			Error  *struct {
+				Message string `json:"message"`
+			} `json:"error"`
+			Usage struct {
+				InputTokens  int `json:"input_tokens"`
+				OutputTokens int `json:"output_tokens"`
+				TotalTokens  int `json:"total_tokens"`
+			} `json:"usage"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal(trimmed, &event); err != nil {
+		return types.StreamChunk{}, fmt.Errorf("malformed response: %w", err)
+	}
+
+	switch event.Type {
+	case "response.output_text.delta":
+		if event.Delta == "" {
+			return types.StreamChunk{}, types.ErrStreamSkip
+		}
+		return types.StreamChunk{Kind: "text", Text: event.Delta}, nil
+	case "response.output_item.added":
+		// A function_call output item opens with its call id + name; arguments
+		// stream in afterward as response.function_call_arguments.delta events.
+		if event.Item.Type == "function_call" {
+			id := event.Item.CallID
+			if id == "" {
+				id = event.Item.ID
+			}
+			return types.StreamChunk{Kind: "tool_call_delta", ToolCallDelta: &types.ToolCallDelta{
+				Index:        event.OutputIndex,
+				ID:           id,
+				Name:         event.Item.Name,
+				ArgsFragment: event.Item.Arguments,
+			}}, nil
+		}
+		return types.StreamChunk{}, types.ErrStreamSkip
+	case "response.function_call_arguments.delta":
+		return types.StreamChunk{Kind: "tool_call_delta", ToolCallDelta: &types.ToolCallDelta{
+			Index:        event.OutputIndex,
+			ArgsFragment: event.Delta,
+		}}, nil
+	case "response.completed", "response.incomplete":
+		// Terminal success events carry status + usage together. "incomplete"
+		// (e.g. max_output_tokens) is a truncated-but-valid response, the analog of
+		// chat finish_reason "length", so it finishes rather than errors.
+		u := event.Response.Usage
+		return types.StreamChunk{
+			Kind:         "finish",
+			FinishReason: event.Response.Status,
+			Usage: &types.TokenUsage{
+				PromptTokens:     u.InputTokens,
+				CompletionTokens: u.OutputTokens,
+				TotalTokens:      u.TotalTokens,
+			},
+		}, nil
+	case "response.failed":
+		// The model run failed; surface as an error so a caller treating any
+		// finish as success doesn't silently miss it.
+		msg := "response failed"
+		if event.Response.Error != nil && event.Response.Error.Message != "" {
+			msg = event.Response.Error.Message
+		}
+		return types.StreamChunk{}, fmt.Errorf("responses stream failed: %s", msg)
+	case "error":
+		// Top-level streaming error event (otherwise swallowed by the default skip).
+		msg := event.Message
+		if msg == "" {
+			msg = "stream error"
+		}
+		return types.StreamChunk{}, fmt.Errorf("responses stream error: %s", msg)
+	case "":
+		if event.Delta != "" {
+			return types.StreamChunk{Kind: "text", Text: event.Delta}, nil
+		}
+		return types.StreamChunk{}, types.ErrStreamSkip
+	default:
+		return types.StreamChunk{}, types.ErrStreamSkip
 	}
 }
 

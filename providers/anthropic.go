@@ -755,11 +755,27 @@ func (p *AnthropicProvider) PrepareStreamRequest(prompt string, options map[stri
 	return json.Marshal(requestBody)
 }
 
+// PrepareStreamRequestWithMessages preserves structured (system + multi-turn)
+// messages instead of flattening to one user turn: it reuses
+// PrepareRequestWithMessages for parity and enables streaming.
+func (p *AnthropicProvider) PrepareStreamRequestWithMessages(messages []types.MemoryMessage, options map[string]interface{}) ([]byte, error) {
+	body, err := p.PrepareRequestWithMessages(messages, options)
+	if err != nil {
+		return nil, err
+	}
+	var requestBody map[string]interface{}
+	if err := json.Unmarshal(body, &requestBody); err != nil {
+		return nil, err
+	}
+	requestBody["stream"] = true
+	return json.Marshal(requestBody)
+}
+
 // ParseStreamResponse processes a single chunk from a streaming response
 func (p *AnthropicProvider) ParseStreamResponse(chunk []byte) (string, error) {
 	// Skip empty lines
 	if len(bytes.TrimSpace(chunk)) == 0 {
-		return "", fmt.Errorf("empty chunk")
+		return "", types.ErrStreamSkip
 	}
 
 	// Check for [DONE] marker
@@ -786,15 +802,104 @@ func (p *AnthropicProvider) ParseStreamResponse(chunk []byte) (string, error) {
 	case "content_block_delta":
 		if event.Delta.Type == "text_delta" {
 			if event.Delta.Text == "" {
-				return "", fmt.Errorf("skip token")
+				return "", types.ErrStreamSkip
 			}
 			return event.Delta.Text, nil
 		}
-		return "", fmt.Errorf("skip token")
+		return "", types.ErrStreamSkip
 	case "message_stop":
 		return "", io.EOF
 	default:
-		return "", fmt.Errorf("skip token")
+		return "", types.ErrStreamSkip
+	}
+}
+
+// ParseStreamResponseRich extends ParseStreamResponse with token usage and the
+// stop reason. Anthropic splits usage across events: message_start carries input
+// tokens, and the final message_delta carries output tokens plus stop_reason —
+// so a consumer must accumulate usage across chunks.
+func (p *AnthropicProvider) ParseStreamResponseRich(chunk []byte) (types.StreamChunk, error) {
+	trimmed := bytes.TrimSpace(chunk)
+	if len(trimmed) == 0 {
+		return types.StreamChunk{}, types.ErrStreamSkip
+	}
+	if bytes.Equal(trimmed, []byte("[DONE]")) {
+		return types.StreamChunk{}, io.EOF
+	}
+
+	var event struct {
+		Type    string `json:"type"`
+		Index   int    `json:"index"`
+		Message struct {
+			Usage struct {
+				InputTokens              int `json:"input_tokens"`
+				OutputTokens             int `json:"output_tokens"`
+				CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+				CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+			} `json:"usage"`
+		} `json:"message"`
+		ContentBlock struct {
+			Type string `json:"type"`
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"content_block"`
+		Delta struct {
+			Type        string `json:"type"`
+			Text        string `json:"text"`
+			PartialJSON string `json:"partial_json"`
+			StopReason  string `json:"stop_reason"`
+		} `json:"delta"`
+		Usage struct {
+			OutputTokens int `json:"output_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(trimmed, &event); err != nil {
+		return types.StreamChunk{}, fmt.Errorf("malformed event: %w", err)
+	}
+
+	switch event.Type {
+	case "message_start":
+		u := event.Message.Usage
+		return types.StreamChunk{Kind: "usage", Usage: &types.TokenUsage{
+			PromptTokens:             u.InputTokens,
+			CompletionTokens:         u.OutputTokens,
+			CacheCreationInputTokens: u.CacheCreationInputTokens,
+			CacheReadInputTokens:     u.CacheReadInputTokens,
+		}}, nil
+	case "content_block_start":
+		// A tool_use block opens with its id+name; arguments stream in later as
+		// input_json_delta fragments on content_block_delta events. The block's
+		// position is the event index, used by the consumer to assemble per-call.
+		if event.ContentBlock.Type == "tool_use" {
+			return types.StreamChunk{Kind: "tool_call_delta", ToolCallDelta: &types.ToolCallDelta{
+				Index: event.Index,
+				ID:    event.ContentBlock.ID,
+				Name:  event.ContentBlock.Name,
+			}}, nil
+		}
+		return types.StreamChunk{}, types.ErrStreamSkip
+	case "content_block_delta":
+		if event.Delta.Type == "text_delta" && event.Delta.Text != "" {
+			return types.StreamChunk{Kind: "text", Text: event.Delta.Text}, nil
+		}
+		if event.Delta.Type == "input_json_delta" {
+			return types.StreamChunk{Kind: "tool_call_delta", ToolCallDelta: &types.ToolCallDelta{
+				Index:        event.Index,
+				ArgsFragment: event.Delta.PartialJSON,
+			}}, nil
+		}
+		return types.StreamChunk{}, types.ErrStreamSkip
+	case "message_delta":
+		// Final event: stop reason + cumulative output tokens.
+		return types.StreamChunk{
+			Kind:         "finish",
+			FinishReason: event.Delta.StopReason,
+			Usage:        &types.TokenUsage{CompletionTokens: event.Usage.OutputTokens},
+		}, nil
+	case "message_stop":
+		return types.StreamChunk{}, io.EOF
+	default:
+		return types.StreamChunk{}, types.ErrStreamSkip
 	}
 }
 

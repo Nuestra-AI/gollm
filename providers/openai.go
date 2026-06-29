@@ -22,6 +22,18 @@ type OpenAIProvider struct {
 	extraHeaders map[string]string      // Additional HTTP headers
 	options      map[string]interface{} // Model-specific options
 	logger       utils.Logger           // Logger instance
+	// systemRole is the role for the system prompt message: "developer" for
+	// OpenAI; compat endpoints that reject it (Google, DeepSeek) set "system".
+	systemRole string
+}
+
+// systemMessageRole returns the role to use for the system prompt message,
+// defaulting to "developer" when unset.
+func (p *OpenAIProvider) systemMessageRole() string {
+	if p.systemRole == "" {
+		return "developer"
+	}
+	return p.systemRole
 }
 
 // NewOpenAIProvider creates a new OpenAI provider instance.
@@ -44,6 +56,7 @@ func NewOpenAIProvider(apiKey, model string, extraHeaders map[string]string) Pro
 		extraHeaders: extraHeaders,
 		options:      make(map[string]interface{}),
 		logger:       utils.NewLogger(utils.LogLevelInfo),
+		systemRole:   "developer",
 	}
 }
 
@@ -225,7 +238,7 @@ func (p *OpenAIProvider) PrepareRequest(prompt string, options map[string]interf
 	// Handle system prompt as developer message
 	if systemPrompt, ok := options["system_prompt"].(string); ok && systemPrompt != "" {
 		request["messages"] = append(request["messages"].([]map[string]interface{}), map[string]interface{}{
-			"role":    "developer",
+			"role":    p.systemMessageRole(),
 			"content": systemPrompt,
 		})
 	}
@@ -399,7 +412,7 @@ func (p *OpenAIProvider) PrepareRequestWithSchema(prompt string, options map[str
 	// Handle system prompt as system message
 	if systemPrompt, ok := options["system_prompt"].(string); ok && systemPrompt != "" {
 		request["messages"] = append([]map[string]interface{}{
-			{"role": "developer", "content": systemPrompt},
+			{"role": p.systemMessageRole(), "content": systemPrompt},
 		}, request["messages"].([]map[string]interface{})...)
 	}
 
@@ -951,11 +964,56 @@ func (p *OpenAIProvider) PrepareStreamRequest(prompt string, options map[string]
 		delete(mergedOptions, "temperature")
 	}
 
+	// Read (and consume) the flag before copying options into the body.
+	includeUsage := streamIncludeUsage(mergedOptions)
+
 	// Add merged options to the request
 	for k, v := range mergedOptions {
 		requestBody[k] = v
 	}
 
+	if includeUsage {
+		// Final usage chunk (choices:[] + usage), parsed by ParseStreamResponseRich.
+		requestBody["stream_options"] = map[string]interface{}{"include_usage": true}
+	}
+
+	return json.Marshal(requestBody)
+}
+
+// streamIncludeUsage reports whether to request a trailing usage chunk
+// (stream_options.include_usage). Defaults true; set the "stream_usage" option
+// false for compat gateways that reject stream_options. The control key is
+// deleted so it never reaches the wire.
+func streamIncludeUsage(options map[string]interface{}) bool {
+	include := true
+	if v, ok := options["stream_usage"]; ok {
+		if b, ok := v.(bool); ok {
+			include = b
+		}
+		delete(options, "stream_usage")
+	}
+	return include
+}
+
+// PrepareStreamRequestWithMessages preserves structured (system + multi-turn)
+// messages instead of flattening to one user turn: it reuses
+// PrepareRequestWithMessages for parity and enables streaming + usage. Inherited
+// by Google and DeepSeek via embedding.
+func (p *OpenAIProvider) PrepareStreamRequestWithMessages(messages []types.MemoryMessage, options map[string]interface{}) ([]byte, error) {
+	includeUsage := streamIncludeUsage(options)
+	body, err := p.PrepareRequestWithMessages(messages, options)
+	if err != nil {
+		return nil, err
+	}
+	var requestBody map[string]interface{}
+	if err := json.Unmarshal(body, &requestBody); err != nil {
+		return nil, err
+	}
+	delete(requestBody, "stream_usage") // strip in case it leaked via provider defaults
+	requestBody["stream"] = true
+	if includeUsage {
+		requestBody["stream_options"] = map[string]interface{}{"include_usage": true}
+	}
 	return json.Marshal(requestBody)
 }
 
@@ -963,7 +1021,7 @@ func (p *OpenAIProvider) PrepareStreamRequest(prompt string, options map[string]
 func (p *OpenAIProvider) ParseStreamResponse(chunk []byte) (string, error) {
 	// Skip empty lines
 	if len(bytes.TrimSpace(chunk)) == 0 {
-		return "", fmt.Errorf("empty chunk")
+		return "", types.ErrStreamSkip
 	}
 
 	// Check for [DONE] marker
@@ -997,10 +1055,96 @@ func (p *OpenAIProvider) ParseStreamResponse(chunk []byte) (string, error) {
 
 	// Skip role-only messages
 	if response.Choices[0].Delta.Role != "" && response.Choices[0].Delta.Content == "" {
-		return "", fmt.Errorf("skip token")
+		return "", types.ErrStreamSkip
 	}
 
 	return response.Choices[0].Delta.Content, nil
+}
+
+// ParseStreamResponseRich adds usage + finish reason. Unlike the text path it
+// does NOT end the stream on finish_reason — OpenAI sends a trailing usage chunk
+// (choices:[] + usage), then [DONE]. Inherited by Google/DeepSeek via embedding.
+func (p *OpenAIProvider) ParseStreamResponseRich(chunk []byte) (types.StreamChunk, error) {
+	trimmed := bytes.TrimSpace(chunk)
+	if len(trimmed) == 0 {
+		return types.StreamChunk{}, types.ErrStreamSkip
+	}
+	if bytes.Equal(trimmed, []byte("[DONE]")) {
+		return types.StreamChunk{}, io.EOF
+	}
+
+	var response struct {
+		Choices []struct {
+			Delta struct {
+				Role      string `json:"role"`
+				Content   string `json:"content"`
+				ToolCalls []struct {
+					Index    int    `json:"index"`
+					ID       string `json:"id"`
+					Type     string `json:"type"`
+					Function struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"delta"`
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+		Usage *struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(trimmed, &response); err != nil {
+		return types.StreamChunk{}, fmt.Errorf("malformed response: %w", err)
+	}
+
+	// Final usage-only chunk (choices empty, usage populated).
+	if len(response.Choices) == 0 {
+		if response.Usage != nil {
+			return types.StreamChunk{Kind: "usage", Usage: &types.TokenUsage{
+				PromptTokens:     response.Usage.PromptTokens,
+				CompletionTokens: response.Usage.CompletionTokens,
+				TotalTokens:      response.Usage.TotalTokens,
+			}}, nil
+		}
+		return types.StreamChunk{}, types.ErrStreamSkip
+	}
+
+	choice := response.Choices[0]
+	// Tool-call fragment: the opening delta carries id+name, later deltas carry
+	// partial-JSON argument pieces. OpenAI streams one tool_calls entry per chunk
+	// (each with its own index), even for parallel calls.
+	if len(choice.Delta.ToolCalls) > 0 {
+		deltas := make([]*types.ToolCallDelta, len(choice.Delta.ToolCalls))
+		for i, tc := range choice.Delta.ToolCalls {
+			deltas[i] = &types.ToolCallDelta{
+				Index:        tc.Index,
+				ID:           tc.ID,
+				Name:         tc.Function.Name,
+				ArgsFragment: tc.Function.Arguments,
+			}
+		}
+		return types.StreamChunk{Kind: "tool_call_delta", ToolCallDelta: deltas[0], ExtraToolCallDeltas: deltas[1:]}, nil
+	}
+	if choice.FinishReason != "" {
+		// Some gateways co-locate usage on the finish chunk instead of a separate
+		// trailing chunk; capture it here so it isn't dropped.
+		finish := types.StreamChunk{Kind: "finish", FinishReason: choice.FinishReason}
+		if response.Usage != nil {
+			finish.Usage = &types.TokenUsage{
+				PromptTokens:     response.Usage.PromptTokens,
+				CompletionTokens: response.Usage.CompletionTokens,
+				TotalTokens:      response.Usage.TotalTokens,
+			}
+		}
+		return finish, nil
+	}
+	if choice.Delta.Content == "" {
+		return types.StreamChunk{}, types.ErrStreamSkip
+	}
+	return types.StreamChunk{Kind: "text", Text: choice.Delta.Content}, nil
 }
 
 // buildOpenAIMessages converts MemoryMessage objects to the OpenAI messages format,
@@ -1012,7 +1156,7 @@ func (p *OpenAIProvider) buildOpenAIMessages(messages []types.MemoryMessage, opt
 	// Handle system prompt as system message
 	if systemPrompt, ok := options["system_prompt"].(string); ok && systemPrompt != "" {
 		result = append(result, map[string]interface{}{
-			"role":    "developer",
+			"role":    p.systemMessageRole(),
 			"content": systemPrompt,
 		})
 	}

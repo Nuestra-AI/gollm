@@ -589,8 +589,8 @@ func TestResponsesParseStreamMalformedJSON(t *testing.T) {
 func TestResponsesParseStreamEmpty(t *testing.T) {
 	p := newTestResponsesProvider("gpt-4o")
 	_, err := p.ParseStreamResponse([]byte("  "))
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "empty chunk")
+	// Skippable chunks now signal via the shared ErrStreamSkip sentinel.
+	assert.ErrorIs(t, err, types.ErrStreamSkip)
 }
 
 func TestResponsesStreamExcludesStreamKey(t *testing.T) {
