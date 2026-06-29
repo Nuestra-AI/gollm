@@ -6,6 +6,8 @@ import (
 	"context"
 	"io"
 	"time"
+
+	"github.com/teilomillet/gollm/types"
 )
 
 // StreamToken represents a single token from the streaming response.
@@ -13,7 +15,9 @@ type StreamToken struct {
 	// Text is the actual token text
 	Text string
 
-	// Type indicates the type of token (e.g., "text", "function_call", "error")
+	// Type is the normalized chunk kind on the rich path ("text", "usage",
+	// "finish", "tool_call_delta"). On the text-only fallback path it mirrors the
+	// SSE event name, which is usually empty (treat as "text").
 	Type string
 
 	// Index is the position of this token in the sequence
@@ -21,6 +25,10 @@ type StreamToken struct {
 
 	// Metadata contains provider-specific metadata
 	Metadata map[string]interface{}
+
+	// ToolCallDelta carries an incremental tool-call fragment when
+	// Type == "tool_call_delta"; nil otherwise.
+	ToolCallDelta *types.ToolCallDelta
 }
 
 // TokenStream represents a stream of tokens from the LLM.
@@ -42,11 +50,25 @@ type StreamConfig struct {
 	// BufferSize is the size of the token buffer
 	BufferSize int
 
-	// RetryStrategy defines how to handle stream interruptions
+	// RetryStrategy governs retries while *establishing* the stream (connection
+	// errors and non-200 responses, before any token is produced). It does not
+	// apply once the stream is yielding data: chat streams have no resumption
+	// point, so mid-stream interruptions are surfaced to the caller instead.
 	RetryStrategy RetryStrategy
+
+	// MaxLineSize caps a single SSE line (defaults to DefaultSSEMaxLineSize when
+	// zero). Raise it via WithMaxLineSize for streams with >1 MB lines; per-stream,
+	// so it's race-free.
+	MaxLineSize int
 }
 
-// RetryStrategy defines how to handle stream interruptions.
+// WithMaxLineSize sets the per-stream SSE line cap (see StreamConfig.MaxLineSize).
+func WithMaxLineSize(n int) StreamOption {
+	return func(c *StreamConfig) { c.MaxLineSize = n }
+}
+
+// RetryStrategy governs retries while establishing a stream (see
+// StreamConfig.RetryStrategy). It is not consulted for mid-stream interruptions.
 type RetryStrategy interface {
 	// ShouldRetry determines if a retry should be attempted.
 	ShouldRetry(error) bool
@@ -90,6 +112,12 @@ type StreamDecoder interface {
 	Err() error
 }
 
+// DefaultSSEMaxLineSize is the default per-line cap for the SSE decoder. It is
+// raised well above bufio.Scanner's 64KB default because a single SSE data line
+// can carry a large delta — notably streamed tool-call arguments — and would
+// otherwise fail mid-stream with bufio.ErrTooLong.
+const DefaultSSEMaxLineSize = 1024 * 1024
+
 // SSEDecoder handles Server-Sent Events (SSE) streaming
 type SSEDecoder struct {
 	reader  *bufio.Scanner
@@ -103,8 +131,22 @@ type Event struct {
 }
 
 func NewSSEDecoder(reader io.Reader) *SSEDecoder {
+	return NewSSEDecoderWithLimit(reader, DefaultSSEMaxLineSize)
+}
+
+// NewSSEDecoderWithLimit caps a single SSE line at maxLineSize bytes (default
+// when <= 0), raised above bufio's 64KB default so large deltas (streamed
+// tool-call arguments) don't fail with bufio.ErrTooLong.
+func NewSSEDecoderWithLimit(reader io.Reader, maxLineSize int) *SSEDecoder {
+	if maxLineSize <= 0 {
+		maxLineSize = DefaultSSEMaxLineSize
+	}
+	scanner := bufio.NewScanner(reader)
+	// bufio caps a token at max(maxLineSize, cap(initialBuf)), so keep the initial
+	// buffer at or below maxLineSize to honor caps smaller than bufio's 64KB.
+	scanner.Buffer(make([]byte, 0, min(64*1024, maxLineSize)), maxLineSize)
 	return &SSEDecoder{
-		reader: bufio.NewScanner(reader),
+		reader: scanner,
 	}
 }
 
@@ -147,6 +189,9 @@ func (d *SSEDecoder) Next() bool {
 		}
 	}
 
+	// Surface scanner failures (notably bufio.ErrTooLong on an over-cap line) so
+	// the caller sees the error instead of a clean EOF.
+	d.err = d.reader.Err()
 	return false
 }
 
