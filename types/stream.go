@@ -2,10 +2,10 @@ package types
 
 import "errors"
 
-// ErrStreamSkip is returned by a stream parser for a chunk with no token to emit
-// (keep-alives, role-only deltas, empty data); the loop skips it. Any other error
-// is surfaced to the caller, so malformed payloads and in-band API errors aren't
-// silently swallowed.
+// ErrStreamSkip is a sentinel a stream parser returns for a chunk with no token
+// to emit (keep-alives, role-only deltas, empty data). Consumers should detect it
+// with errors.Is and continue; any other error is theirs to surface rather than
+// swallow, so malformed payloads and in-band API errors don't go unnoticed.
 var ErrStreamSkip = errors.New("skip token")
 
 // StreamChunk is a provider-normalized unit emitted by the optional

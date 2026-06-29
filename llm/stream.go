@@ -15,8 +15,9 @@ type StreamToken struct {
 	// Text is the actual token text
 	Text string
 
-	// Type indicates the type of token (e.g., "text", "usage", "finish",
-	// "tool_call_delta", "error")
+	// Type is the normalized chunk kind on the rich path ("text", "usage",
+	// "finish", "tool_call_delta"). On the text-only fallback path it mirrors the
+	// SSE event name, which is usually empty (treat as "text").
 	Type string
 
 	// Index is the position of this token in the sequence
@@ -141,7 +142,9 @@ func NewSSEDecoderWithLimit(reader io.Reader, maxLineSize int) *SSEDecoder {
 		maxLineSize = DefaultSSEMaxLineSize
 	}
 	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 0, 64*1024), maxLineSize)
+	// bufio caps a token at max(maxLineSize, cap(initialBuf)), so keep the initial
+	// buffer at or below maxLineSize to honor caps smaller than bufio's 64KB.
+	scanner.Buffer(make([]byte, 0, min(64*1024, maxLineSize)), maxLineSize)
 	return &SSEDecoder{
 		reader: scanner,
 	}
@@ -186,6 +189,9 @@ func (d *SSEDecoder) Next() bool {
 		}
 	}
 
+	// Surface scanner failures (notably bufio.ErrTooLong on an over-cap line) so
+	// the caller sees the error instead of a clean EOF.
+	d.err = d.reader.Err()
 	return false
 }
 

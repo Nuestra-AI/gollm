@@ -1,6 +1,8 @@
 package llm
 
 import (
+	"bufio"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -23,8 +25,15 @@ func TestSSEDecoderRespectsLimit(t *testing.T) {
 	if small.Next() {
 		t.Error("oversized line should not yield an event under a 64KB cap")
 	}
+	// The over-cap line must surface as bufio.ErrTooLong, not a clean EOF.
+	if err := small.Err(); !errors.Is(err, bufio.ErrTooLong) {
+		t.Errorf("oversized line: Err() = %v; want bufio.ErrTooLong", err)
+	}
 	big := NewSSEDecoderWithLimit(strings.NewReader(line), 1<<20)
 	if !big.Next() {
 		t.Error("line should be read under a 1MB cap")
+	}
+	if err := big.Err(); err != nil {
+		t.Errorf("under-cap line: unexpected Err() = %v", err)
 	}
 }
