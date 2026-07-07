@@ -277,7 +277,139 @@ func (p *AnthropicProvider) PrepareRequest(prompt string, options map[string]int
 		}
 	}
 
+	// Configure thinking from reasoning_effort (adaptive vs. budgeted by model).
+	// Runs after the passthrough so it sees the final max_tokens and wins over
+	// any raw thinking/output_config option.
+	p.applyThinking(requestBody, options)
+
 	return json.Marshal(requestBody)
+}
+
+// anthropicUsesLegacyThinking reports models that predate adaptive thinking and
+// must use manual extended thinking (thinking:{type:"enabled",budget_tokens:N}).
+// This is a deliberately frozen set: Anthropic will not ship new sub-4.6 models,
+// so newer and unknown models default to adaptive — the forward-compatible
+// direction, since budget_tokens is being removed across the line and is already
+// rejected with a 400 on Opus 4.7+/Sonnet 5/Fable 5. Failing open to adaptive
+// keeps the next Opus/Sonnet release working without a code change.
+func anthropicUsesLegacyThinking(model string) bool {
+	m := strings.ToLower(model)
+	for _, legacy := range []string{
+		"opus-4-5", "opus-4-1", "opus-4-0", "opus-3",
+		"sonnet-4-5", "sonnet-4-0", "sonnet-3",
+		"haiku-4-5", "haiku-3",
+		"claude-2",
+	} {
+		if strings.Contains(m, legacy) {
+			return true
+		}
+	}
+	return false
+}
+
+// anthropicSupportsXhighEffort reports whether the model accepts the "xhigh"
+// effort level, which Opus 4.7 introduced. Opus 4.6 and Sonnet 4.6 use adaptive
+// thinking but reject "xhigh" (they top out at "max"), so it must be demoted for
+// them.
+func anthropicSupportsXhighEffort(model string) bool {
+	m := strings.ToLower(model)
+	return strings.Contains(m, "opus-4-7") || strings.Contains(m, "opus-4-8") ||
+		strings.Contains(m, "sonnet-5") || strings.Contains(m, "fable") || strings.Contains(m, "mythos")
+}
+
+// normalizeAnthropicEffort maps a reasoning_effort hint onto the effort levels
+// Anthropic's output_config accepts (low/medium/high/xhigh/max). OpenAI's
+// "minimal" collapses to "low"; anything unrecognized defaults to "medium".
+func normalizeAnthropicEffort(effort string) string {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "minimal", "low":
+		return "low"
+	case "high":
+		return "high"
+	case "xhigh":
+		return "xhigh"
+	case "max":
+		return "max"
+	default:
+		return "medium"
+	}
+}
+
+// anthropicThinkingBudget maps a reasoning_effort level onto a budget_tokens
+// value for legacy models that use manual extended thinking. The API requires
+// 1024 <= budget_tokens < max_tokens; ok is false when that constraint cannot be
+// enforced — max_tokens unknown (<= 0) or too small (<= 1024) — signalling the
+// caller to skip thinking rather than emit a budget that may violate the API.
+func anthropicThinkingBudget(effort string, maxTokens int) (int, bool) {
+	// Without a known, sufficient max_tokens we cannot guarantee
+	// budget_tokens < max_tokens, so decline rather than risk a 400.
+	if maxTokens <= 1024 {
+		return 0, false
+	}
+	var budget int
+	switch normalizeAnthropicEffort(effort) {
+	case "low":
+		budget = 4096
+	case "high", "xhigh", "max":
+		budget = 16384
+	default: // medium
+		budget = 8192
+	}
+	if budget >= maxTokens {
+		budget = maxTokens - 1
+	}
+	if budget < 1024 {
+		budget = 1024
+	}
+	return budget, true
+}
+
+// applyThinking configures Anthropic thinking on the request body from the
+// reasoning_effort option. It is a no-op when no reasoning effort is requested,
+// so thinking stays off by default (matching Anthropic's default on Opus 4.7+).
+// It must run AFTER the caller's option passthrough so it reads the final
+// max_tokens and takes precedence over any raw thinking/output_config option.
+//
+// Adaptive-thinking models get thinking:{type:"adaptive"} with depth steered via
+// output_config.effort — never budget_tokens, which they reject. Legacy models
+// get manual extended thinking with an effort-derived budget_tokens instead.
+func (p *AnthropicProvider) applyThinking(requestBody map[string]interface{}, options map[string]interface{}) {
+	// A per-request reasoning_effort takes precedence over a provider-level
+	// default (set via SetOption), mirroring how the OpenAI provider merges
+	// request options over provider defaults.
+	effort, ok := options["reasoning_effort"].(string)
+	if !ok || effort == "" {
+		effort, ok = p.options["reasoning_effort"].(string)
+	}
+	if !ok || effort == "" {
+		return
+	}
+
+	if !anthropicUsesLegacyThinking(p.model) {
+		requestBody["thinking"] = map[string]interface{}{"type": "adaptive"}
+		eff := normalizeAnthropicEffort(effort)
+		if eff == "xhigh" && !anthropicSupportsXhighEffort(p.model) {
+			eff = "high"
+		}
+		// Merge into any caller-supplied output_config rather than clobbering it.
+		oc, _ := requestBody["output_config"].(map[string]interface{})
+		if oc == nil {
+			oc = map[string]interface{}{}
+		}
+		oc["effort"] = eff
+		requestBody["output_config"] = oc
+		return
+	}
+
+	// Validate the budget against the max_tokens actually in the request body
+	// (toInt handles int/float64/int64; any other type yields 0 → thinking is
+	// skipped, never sent with an unenforceable budget).
+	if budget, ok := anthropicThinkingBudget(effort, toInt(requestBody["max_tokens"])); ok {
+		requestBody["thinking"] = map[string]interface{}{
+			"type":          "enabled",
+			"budget_tokens": budget,
+		}
+	}
 }
 
 // Helper function to split the system prompt into a maximum of n parts
@@ -349,6 +481,10 @@ func (p *AnthropicProvider) PrepareRequestWithSchema(prompt string, options map[
 			requestBody[k] = v
 		}
 	}
+
+	// Configure thinking after the passthrough so budget_tokens can be validated
+	// against the max_tokens the caller supplied via options.
+	p.applyThinking(requestBody, options)
 
 	return json.Marshal(requestBody)
 }
@@ -760,6 +896,10 @@ func (p *AnthropicProvider) PrepareStreamRequest(prompt string, options map[stri
 		}
 	}
 
+	// Configure thinking after the passthrough so it sees the final max_tokens
+	// and wins over any raw thinking/output_config option.
+	p.applyThinking(requestBody, options)
+
 	return json.Marshal(requestBody)
 }
 
@@ -1129,6 +1269,10 @@ func (p *AnthropicProvider) PrepareRequestWithMessages(messages []types.MemoryMe
 			requestBody[k] = v
 		}
 	}
+
+	// Configure thinking after the passthrough so it sees the final max_tokens
+	// and wins over any raw thinking/output_config option.
+	p.applyThinking(requestBody, options)
 
 	return json.Marshal(requestBody)
 }
