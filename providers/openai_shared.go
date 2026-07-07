@@ -1,6 +1,23 @@
 package providers
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/teilomillet/gollm/types"
+)
+
+// optionString extracts a string from an option value, accepting either a plain
+// string or a types.ReasoningEffort (the published cross-provider effort enum),
+// so callers can pass either form to SetOption("reasoning_effort", ...).
+func optionString(v interface{}) (string, bool) {
+	switch s := v.(type) {
+	case string:
+		return s, true
+	case types.ReasoningEffort:
+		return string(s), true
+	}
+	return "", false
+}
 
 // mergeOpenAIResponsesOptions combines provider defaults with per-request options
 // for the Responses API, using max_output_tokens instead of max_completion_tokens.

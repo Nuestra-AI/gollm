@@ -377,9 +377,9 @@ func (p *AnthropicProvider) applyThinking(requestBody map[string]interface{}, op
 	// A per-request reasoning_effort takes precedence over a provider-level
 	// default (set via SetOption), mirroring how the OpenAI provider merges
 	// request options over provider defaults.
-	effort, ok := options["reasoning_effort"].(string)
+	effort, ok := optionString(options["reasoning_effort"])
 	if !ok || effort == "" {
-		effort, ok = p.options["reasoning_effort"].(string)
+		effort, ok = optionString(p.options["reasoning_effort"])
 	}
 	if !ok || effort == "" {
 		return

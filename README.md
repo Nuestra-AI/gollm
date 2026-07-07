@@ -30,6 +30,7 @@
   - [Model Comparison](#model-comparison)
 - [Advanced Usage](#advanced-usage)
   - [Prompt Engineering](#prompt-engineering)
+  - [Reasoning & Thinking Control](#reasoning--thinking-control)
   - [Pre-built Functions (Chain of Thought)](#pre-built-functions-chain-of-thought)
   - [Working with Examples](#working-with-examples)
   - [Prompt Templates](#prompt-templates)
@@ -269,6 +270,83 @@ llm.SetOption("provider_preferences", map[string]interface{}{
     },
 })
 ```
+
+### Reasoning & Thinking Control
+
+Modern OpenAI, Anthropic, and Gemini models can spend extra "thinking" tokens
+before answering. `gollm` exposes one portable knob for all three:
+
+```go
+// Works across OpenAI, Anthropic, and Gemini reasoning models.
+llm.SetOption("reasoning_effort", gollm.ReasoningEffortMedium)
+// A plain string works too: llm.SetOption("reasoning_effort", "medium")
+```
+
+Use the published `gollm.ReasoningEffort` constants to avoid typos:
+`ReasoningEffortNone`, `ReasoningEffortLow`, `ReasoningEffortMedium`,
+`ReasoningEffortHigh`, `ReasoningEffortXHigh`, `ReasoningEffortMax`. These form an
+ascending canonical scale; each provider maps them onto the values its API
+accepts, clamping the ends rather than rejecting them (e.g. `xhigh`/`max` clamp to
+`high` on OpenAI and Gemini; `none` disables thinking only where the model allows).
+
+**Guidance: default to `reasoning_effort`.** It maps to each provider's native
+reasoning control for you, so the same code keeps working when you switch models
+or providers. Reach for the provider-specific fields below only when you need
+finer control than the effort scale can express.
+
+#### OpenAI
+
+- Applies to reasoning models only — the o-series (`o1`, `o3`, `o4-mini`, …) and
+  the GPT-5 family. It is silently ignored on non-reasoning models (`gpt-4o`,
+  `gpt-4.1`, …).
+- The value is forwarded verbatim, so use a value the API accepts:
+  `"minimal"` (GPT-5 only), `"low"`, `"medium"`, or `"high"`.
+
+```go
+llm.SetOption("reasoning_effort", "high") // e.g. gpt-5, o3
+```
+
+#### Anthropic
+
+- Off by default; setting `reasoning_effort` turns extended thinking on.
+- Model-aware: adaptive-thinking models (Opus 4.7+, Sonnet 5, Fable) receive
+  `thinking: {type: "adaptive"}` with the effort steering depth; older models
+  (Opus 4.5/4.1, Sonnet 4.5/4.0, Haiku 4.5, …) receive manual extended thinking
+  with an effort-derived `budget_tokens` kept below `max_tokens`.
+- Accepts `"low"`, `"medium"`, `"high"`, plus `"xhigh"`/`"max"` (`xhigh` is
+  demoted to `high` on models that predate it). Unknown/future models default to
+  adaptive.
+
+```go
+llm.SetOption("max_tokens", 8192)
+llm.SetOption("reasoning_effort", "high")
+```
+
+#### Gemini (2.x and 3.x)
+
+`reasoning_effort` is emitted as Gemini's top-level knob and works unchanged
+across both families, so it is the recommended path. For exact per-family
+control, use the native fields instead (they are mutually exclusive with
+`reasoning_effort`, and `gollm` cross-translates them if you target the other
+family):
+
+```go
+// Portable — recommended (values: "none", "low", "medium", "high"):
+llm.SetOption("reasoning_effort", "low")
+
+// Gemini 2.x native: explicit token budget (0 disables, -1 = dynamic):
+llm.SetOption("thinking_budget", 2048)
+
+// Gemini 3.x native: thinking level
+// (flash: minimal/low/medium/high; pro: low/high):
+llm.SetOption("thinking_level", "high")
+
+// Orthogonal — return thought summaries (any of the above):
+llm.SetOption("include_thoughts", true)
+```
+
+Thinking controls apply to Gemini 2.5+ and 3.x; the non-thinking 1.x/2.0 base
+models ignore them.
 
 ### Pre-built Functions (Chain of Thought)
 

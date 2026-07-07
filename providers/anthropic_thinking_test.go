@@ -3,6 +3,8 @@ package providers
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/teilomillet/gollm/types"
 )
 
 // decodeAnthropicRequest unmarshals a prepared request body for inspection.
@@ -347,6 +349,23 @@ func TestAnthropicThinkingMergesUserOutputConfig(t *testing.T) {
 	}
 	if oc["other"] != "keep" {
 		t.Errorf("caller output_config keys must be preserved, got %v", oc)
+	}
+}
+
+// TestAnthropicReasoningEffortEnumType verifies the published types.ReasoningEffort
+// enum is accepted (not just a plain string) on the Anthropic path.
+func TestAnthropicReasoningEffortEnumType(t *testing.T) {
+	p := NewAnthropicProvider("fake-key", "claude-opus-4-8", nil).(*AnthropicProvider)
+	p.SetOption("max_tokens", 4096)
+
+	body, err := p.PrepareRequest("hi", map[string]interface{}{"reasoning_effort": types.ReasoningEffortXHigh})
+	if err != nil {
+		t.Fatalf("PrepareRequest failed: %v", err)
+	}
+	req := decodeAnthropicRequest(t, body)
+	oc := mustObject(t, req["output_config"], "output_config")
+	if oc["effort"] != "xhigh" {
+		t.Errorf("expected ReasoningEffortXHigh honored as xhigh, got %v", oc["effort"])
 	}
 }
 
