@@ -163,13 +163,22 @@ func (p *OpenRouterProvider) PrepareRequest(prompt string, options map[string]in
 	// Create messages array with system and user messages
 	messages := []map[string]interface{}{}
 
-	// If there's a system message in the options, use it
-	if sysMsg, ok := req["system_message"].(string); ok {
+	// Inject the system prompt as a leading system message. system_prompt is the
+	// gollm control key (LLMImpl sets it via SetOption, so it also arrives via
+	// p.options above); system_message is the OpenRouter-specific equivalent.
+	// Prefer system_prompt, honor either, and strip BOTH so neither leaks to the
+	// wire as an unknown parameter.
+	sysPrompt, _ := req["system_prompt"].(string)
+	if sysPrompt == "" {
+		sysPrompt, _ = req["system_message"].(string)
+	}
+	delete(req, "system_prompt")
+	delete(req, "system_message")
+	if sysPrompt != "" {
 		messages = append(messages, map[string]interface{}{
 			"role":    "system",
-			"content": sysMsg,
+			"content": sysPrompt,
 		})
-		delete(req, "system_message")
 	}
 
 	// Add the user prompt (with image support) using shared helper
@@ -252,6 +261,12 @@ func (p *OpenRouterProvider) PrepareCompletionRequest(prompt string, options map
 	// Add the prompt
 	req["prompt"] = prompt
 
+	// The legacy completions endpoint has no messages array to carry a system
+	// role, so system_prompt/system_message can't be injected here — but strip
+	// both control keys so neither leaks to the wire as an unknown parameter.
+	delete(req, "system_prompt")
+	delete(req, "system_message")
+
 	// Handle provider routing preferences if provided
 	if providerPrefs, ok := req["provider_preferences"].(map[string]interface{}); ok {
 		req["provider"] = providerPrefs
@@ -303,13 +318,22 @@ func (p *OpenRouterProvider) PrepareRequestWithSchema(prompt string, options map
 	// Create messages array with system and user messages
 	messages := []map[string]interface{}{}
 
-	// If there's a system message in the options, use it
-	if sysMsg, ok := req["system_message"].(string); ok {
+	// Inject the system prompt as a leading system message. system_prompt is the
+	// gollm control key (LLMImpl sets it via SetOption, so it also arrives via
+	// p.options above); system_message is the OpenRouter-specific equivalent.
+	// Prefer system_prompt, honor either, and strip BOTH so neither leaks to the
+	// wire as an unknown parameter.
+	sysPrompt, _ := req["system_prompt"].(string)
+	if sysPrompt == "" {
+		sysPrompt, _ = req["system_message"].(string)
+	}
+	delete(req, "system_prompt")
+	delete(req, "system_message")
+	if sysPrompt != "" {
 		messages = append(messages, map[string]interface{}{
 			"role":    "system",
-			"content": sysMsg,
+			"content": sysPrompt,
 		})
-		delete(req, "system_message")
 	}
 
 	// Add the user prompt
@@ -320,14 +344,22 @@ func (p *OpenRouterProvider) PrepareRequestWithSchema(prompt string, options map
 
 	req["messages"] = messages
 
-	// Normalize and add JSON schema to the response format
+	// Normalize and add the JSON schema to the response format. OpenRouter's
+	// structured-outputs contract is the OpenAI-style json_schema envelope
+	// ({type: json_schema, json_schema: {name, strict, schema}}) — NOT a bare
+	// json_object with a schema key, which supported models ignore. Matches the
+	// shape used by the openai/lambda providers.
 	schemaObj, err := normalizeSchema(schema)
 	if err != nil {
 		return nil, fmt.Errorf("failed to normalize schema: %w", err)
 	}
 	req["response_format"] = map[string]interface{}{
-		"type":   "json_object",
-		"schema": schemaObj,
+		"type": "json_schema",
+		"json_schema": map[string]interface{}{
+			"name":   "structured_response",
+			"strict": true,
+			"schema": schemaObj,
+		},
 	}
 
 	// Handle tools/function calling if provided
@@ -722,33 +754,10 @@ func (p *OpenRouterProvider) PrepareStreamRequestWithMessages(messages []types.M
 		streamOptions["usage"] = map[string]interface{}{"include": true}
 	}
 
-	// PrepareRequestWithMessages doesn't inject system_prompt, so prepend it as a
-	// leading system message. Resolve from the per-call options or a provider-level
-	// default (p.options), preferring the per-call value.
-	sp, ok := streamOptions["system_prompt"].(string)
-	if !ok || sp == "" {
-		sp, _ = p.options["system_prompt"].(string)
-	}
-	if sp != "" {
-		messages = append([]types.MemoryMessage{{Role: "system", Content: sp}}, messages...)
-	}
-	delete(streamOptions, "system_prompt")
-
-	body, err := p.PrepareRequestWithMessages(messages, streamOptions)
-	if err != nil {
-		return nil, err
-	}
-	// PrepareRequestWithMessages may re-merge system_prompt from p.options as a raw
-	// field; strip it so the control key never reaches the wire.
-	var requestBody map[string]interface{}
-	if err := json.Unmarshal(body, &requestBody); err != nil {
-		return nil, err
-	}
-	if _, leaked := requestBody["system_prompt"]; !leaked {
-		return body, nil
-	}
-	delete(requestBody, "system_prompt")
-	return json.Marshal(requestBody)
+	// system_prompt injection + control-key stripping is handled by
+	// PrepareRequestWithMessages (resolving from these options and p.options), so
+	// just delegate.
+	return p.PrepareRequestWithMessages(messages, streamOptions)
 }
 
 // ParseStreamResponseRich parses OpenRouter's OpenAI-compatible stream: text on
@@ -950,6 +959,21 @@ func (p *OpenRouterProvider) PrepareRequestWithMessages(messages []types.MemoryM
 		delete(req, "provider_preferences")
 	}
 
+	// Inject the system prompt as a leading system message. system_prompt is a
+	// gollm control key (LLMImpl sets it via SetOption, so it also arrives via
+	// p.options above); system_message is the OpenRouter-specific equivalent.
+	// Prefer system_prompt, honoring either, and strip BOTH from req so neither
+	// control key leaks to the wire as an unknown parameter.
+	sysPrompt, _ := req["system_prompt"].(string)
+	if sysPrompt == "" {
+		sysPrompt, _ = req["system_message"].(string)
+	}
+	delete(req, "system_prompt")
+	delete(req, "system_message")
+	if sysPrompt != "" {
+		messages = append([]types.MemoryMessage{{Role: "system", Content: sysPrompt}}, messages...)
+	}
+
 	// Convert memory messages to OpenRouter format (OpenAI-compatible)
 	formattedMessages := make([]map[string]interface{}, 0, len(messages))
 	for _, msg := range messages {
@@ -1034,9 +1058,20 @@ func (p *OpenRouterProvider) PrepareRequestWithMessagesAndSchema(messages []type
 	for k, v := range options {
 		newOptions[k] = v
 	}
+	// Normalize the schema and use the same json_schema envelope as
+	// PrepareRequestWithSchema, so both schema paths produce OpenRouter's
+	// documented structured-outputs shape and accept/reject the same inputs.
+	schemaObj, err := normalizeSchema(schema)
+	if err != nil {
+		return nil, fmt.Errorf("failed to normalize schema: %w", err)
+	}
 	newOptions["response_format"] = map[string]interface{}{
-		"type":   "json_object",
-		"schema": schema,
+		"type": "json_schema",
+		"json_schema": map[string]interface{}{
+			"name":   "structured_response",
+			"strict": true,
+			"schema": schemaObj,
+		},
 	}
 	return p.PrepareRequestWithMessages(messages, newOptions)
 }

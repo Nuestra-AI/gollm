@@ -228,11 +228,16 @@ func TestOpenRouterProvider(t *testing.T) {
 		err = json.Unmarshal(body, &req)
 		assert.NoError(t, err)
 
-		// Check response format was set correctly
+		// Check response format uses OpenRouter's json_schema envelope
+		// ({type: json_schema, json_schema: {name, strict, schema}}).
 		responseFormat, ok := req["response_format"].(map[string]interface{})
 		assert.True(t, ok)
-		assert.Equal(t, "json_object", responseFormat["type"])
-		assert.Equal(t, schema, responseFormat["schema"])
+		assert.Equal(t, "json_schema", responseFormat["type"])
+		jsonSchema, ok := responseFormat["json_schema"].(map[string]interface{})
+		assert.True(t, ok)
+		assert.Equal(t, "structured_response", jsonSchema["name"])
+		assert.Equal(t, true, jsonSchema["strict"])
+		assert.Equal(t, schema, jsonSchema["schema"])
 	})
 
 	t.Run("PrepareRequestWithMessages formats messages correctly", func(t *testing.T) {
