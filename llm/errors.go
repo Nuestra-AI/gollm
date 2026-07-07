@@ -2,6 +2,8 @@ package llm
 
 import (
 	"fmt"
+	"net/http"
+	"unicode/utf8"
 
 	"github.com/teilomillet/gollm/utils"
 )
@@ -115,6 +117,58 @@ func NewLLMError(errType ErrorType, message string, err error) *LLMError {
 		Message: message,
 		Err:     err,
 	}
+}
+
+// classifyHTTPStatus maps a non-200 HTTP status code to the most specific
+// ErrorType available, so callers (and the backend) can distinguish retryable
+// rate limits, non-retryable auth failures, and deterministic bad requests
+// from generic API errors.
+//
+// Only the statuses below are intentionally specialized:
+//   - 429                     -> RateLimit      (retryable with backoff)
+//   - 401 / 403               -> Authentication (non-retryable; user config)
+//   - 400 / 413 / 422         -> InvalidInput   (deterministic; e.g. context-length,
+//     oversized payload, or unprocessable params)
+//
+// Everything else (incl. 408, 409, and all 5xx) falls back to ErrorTypeAPI.
+// Note that 408 and 5xx are still retried on the stream path via a separate
+// status check, independent of this type.
+func classifyHTTPStatus(statusCode int) ErrorType {
+	switch statusCode {
+	case http.StatusTooManyRequests: // 429
+		return ErrorTypeRateLimit
+	case http.StatusUnauthorized, http.StatusForbidden: // 401 / 403
+		return ErrorTypeAuthentication
+	case http.StatusBadRequest, // 400
+		http.StatusRequestEntityTooLarge, // 413 (payload/context too large)
+		http.StatusUnprocessableEntity:   // 422 (invalid params on some providers)
+		return ErrorTypeInvalidInput
+	default:
+		return ErrorTypeAPI
+	}
+}
+
+// truncateBytes caps b at max runes (appending an ellipsis when truncated) and
+// returns it as a string, so large provider error payloads can be carried in an
+// error/log line without dumping the full body. It walks to a UTF-8 rune
+// boundary and converts only the retained prefix — no []rune copy and no
+// full-body string conversion — and the result is always valid UTF-8 even when
+// the body contains multibyte characters.
+func truncateBytes(b []byte, max int) string {
+	// Fast path: byte length ≤ max implies rune count ≤ max, so no truncation.
+	if len(b) <= max {
+		return string(b)
+	}
+	i, n := 0, 0
+	for i < len(b) && n < max {
+		_, size := utf8.DecodeRune(b[i:])
+		i += size
+		n++
+	}
+	if i >= len(b) {
+		return string(b)
+	}
+	return string(b[:i]) + "…"
 }
 
 // HandleError processes an error based on its severity.

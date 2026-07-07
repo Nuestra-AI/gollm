@@ -367,6 +367,9 @@ func (p *OpenRouterProvider) ParseResponse(body []byte) (string, error) {
 			FinishReason       string `json:"finish_reason"`
 			NativeFinishReason string `json:"native_finish_reason"`
 		} `json:"choices"`
+		Usage struct {
+			CompletionTokens int `json:"completion_tokens"`
+		} `json:"usage"`
 		Error struct {
 			Message string `json:"message"`
 		} `json:"error"`
@@ -437,6 +440,17 @@ func (p *OpenRouterProvider) ParseResponse(body []byte) (string, error) {
 	// Check for errors
 	if textResp.Error.Message != "" {
 		return "", fmt.Errorf("OpenRouter API error: %s", textResp.Error.Message)
+	}
+
+	// A chat response with a choice present but no content and no tool calls
+	// fails the chat branch above and lands here (no usable text either). Surface
+	// it as the uniform empty-response sentinel (with finish_reason from the
+	// already-decoded chat choice + completion_tokens) rather than silently
+	// returning empty text or a mismatched "no completion choices" error.
+	if chatErr == nil && len(chatResp.Choices) > 0 &&
+		(len(textResp.Choices) == 0 || textResp.Choices[0].Text == "") {
+		return "", fmt.Errorf("no content or tool calls in response (finish_reason: %q, completion_tokens: %d)",
+			chatResp.Choices[0].FinishReason, chatResp.Usage.CompletionTokens)
 	}
 
 	// Check if we have at least one choice
@@ -578,6 +592,17 @@ func (p *OpenRouterProvider) ParseResponseWithUsage(body []byte) (string, *types
 	// Check for errors
 	if textResp.Error.Message != "" {
 		return "", nil, fmt.Errorf("OpenRouter API error: %s", textResp.Error.Message)
+	}
+
+	// A chat response with a choice present but no content and no tool calls
+	// fails the chat branch above and lands here (no usable text either). Surface
+	// it as the uniform empty-response sentinel (with finish_reason from the
+	// already-decoded chat choice + completion_tokens) rather than silently
+	// returning empty text or a mismatched "no completion choices" error.
+	if chatErr == nil && len(chatResp.Choices) > 0 &&
+		(len(textResp.Choices) == 0 || textResp.Choices[0].Text == "") {
+		return "", nil, fmt.Errorf("no content or tool calls in response (finish_reason: %q, completion_tokens: %d)",
+			chatResp.Choices[0].FinishReason, chatResp.Usage.CompletionTokens)
 	}
 
 	// Check if we have at least one choice

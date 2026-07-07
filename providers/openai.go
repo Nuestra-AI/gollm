@@ -528,7 +528,11 @@ func (p *OpenAIProvider) ParseResponse(body []byte) (string, error) {
 					} `json:"function"`
 				} `json:"tool_calls"`
 			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
+		Usage struct {
+			CompletionTokens int `json:"completion_tokens"`
+		} `json:"usage"`
 	}
 
 	if err := json.Unmarshal(body, &response); err != nil {
@@ -563,7 +567,8 @@ func (p *OpenAIProvider) ParseResponse(body []byte) (string, error) {
 	}
 
 	if len(parts) == 0 {
-		return "", fmt.Errorf("no content or tool calls in response")
+		return "", fmt.Errorf("no content or tool calls in response (finish_reason: %q, completion_tokens: %d)",
+			response.Choices[0].FinishReason, response.Usage.CompletionTokens)
 	}
 
 	return strings.Join(parts, "\n"), nil
@@ -596,6 +601,7 @@ func (p *OpenAIProvider) ParseResponseWithUsage(body []byte) (string, *types.Res
 					} `json:"function"`
 				} `json:"tool_calls"`
 			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
 		Usage struct {
 			PromptTokens     int `json:"prompt_tokens"`
@@ -751,7 +757,8 @@ func (p *OpenAIProvider) ParseResponseWithUsage(body []byte) (string, *types.Res
 	}
 
 	if len(parts) == 0 {
-		return "", nil, fmt.Errorf("no content or tool calls in response")
+		return "", nil, fmt.Errorf("no content or tool calls in response (finish_reason: %q, completion_tokens: %d)",
+			response.Choices[0].FinishReason, response.Usage.CompletionTokens)
 	}
 
 	return strings.Join(parts, "\n"), details, nil

@@ -390,7 +390,11 @@ func (p *AnthropicProvider) ParseResponse(body []byte) (string, error) {
 		return "", fmt.Errorf("error parsing response: %w", err)
 	}
 	if len(response.Content) == 0 {
-		return "", fmt.Errorf("empty response from LLM")
+		// Anthropic's native field is stop_reason; write it under the finish_reason:
+		// label (and keep the backend sentinel intact) so classification is uniform
+		// across providers.
+		return "", fmt.Errorf("no content or tool calls in response (finish_reason: %q, completion_tokens: %d)",
+			response.StopReason, response.Usage.OutputTokens)
 	}
 
 	p.logger.Debug("Number of content blocks: %d", len(response.Content))
@@ -520,7 +524,11 @@ func (p *AnthropicProvider) ParseResponseWithUsage(body []byte) (string, *types.
 	}
 
 	if len(response.Content) == 0 {
-		return "", nil, fmt.Errorf("empty response from LLM")
+		// Anthropic's native field is stop_reason; write it under the finish_reason:
+		// label (and keep the backend sentinel intact) so classification is uniform
+		// across providers.
+		return "", nil, fmt.Errorf("no content or tool calls in response (finish_reason: %q, completion_tokens: %d)",
+			response.StopReason, response.Usage.OutputTokens)
 	}
 
 	// Extract and normalize response details including ID and usage information

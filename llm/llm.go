@@ -315,7 +315,7 @@ func (l *LLMImpl) attemptGenerate(ctx context.Context, prompt *Prompt) (string, 
 
 	if resp.StatusCode != http.StatusOK {
 		l.logger.Warn("API error", "provider", l.Provider.Name(), slog.Int("status", resp.StatusCode), "body", string(body))
-		return "", NewLLMError(ErrorTypeAPI, fmt.Sprintf("API error: status code %d", resp.StatusCode), nil)
+		return "", NewLLMError(classifyHTTPStatus(resp.StatusCode), fmt.Sprintf("API error: status code %d: %s", resp.StatusCode, truncateBytes(body, 500)), nil)
 	}
 
 	// Extract and log caching information
@@ -554,7 +554,7 @@ func (l *LLMImpl) attemptGenerateWithUsage(ctx context.Context, prompt *Prompt) 
 
 	if resp.StatusCode != http.StatusOK {
 		l.logger.Warn("API error", "provider", l.Provider.Name(), slog.Int("status", resp.StatusCode), "body", string(body))
-		return "", nil, NewLLMError(ErrorTypeAPI, fmt.Sprintf("API error: status code %d", resp.StatusCode), nil)
+		return "", nil, NewLLMError(classifyHTTPStatus(resp.StatusCode), fmt.Sprintf("API error: status code %d: %s", resp.StatusCode, truncateBytes(body, 500)), nil)
 	}
 
 	// Try to use ParseResponseWithUsage if available
@@ -663,7 +663,7 @@ func (l *LLMImpl) attemptGenerateWithSchemaAndUsage(ctx context.Context, prompt 
 
 	if resp.StatusCode != http.StatusOK {
 		l.logger.Warn("API error", "provider", l.Provider.Name(), slog.Int("status", resp.StatusCode), "body", string(body))
-		return "", nil, fullPrompt, NewLLMError(ErrorTypeAPI, fmt.Sprintf("API error: status code %d", resp.StatusCode), nil)
+		return "", nil, fullPrompt, NewLLMError(classifyHTTPStatus(resp.StatusCode), fmt.Sprintf("API error: status code %d: %s", resp.StatusCode, truncateBytes(body, 500)), nil)
 	}
 
 	// Try to use ParseResponseWithUsage
@@ -733,7 +733,7 @@ func (l *LLMImpl) attemptGenerateWithSchema(ctx context.Context, prompt *Prompt,
 
 	if resp.StatusCode != http.StatusOK {
 		l.logger.Warn("API error", "provider", l.Provider.Name(), slog.Int("status", resp.StatusCode), "body", string(body))
-		return "", fullPrompt, NewLLMError(ErrorTypeAPI, fmt.Sprintf("API error: status code %d", resp.StatusCode), nil)
+		return "", fullPrompt, NewLLMError(classifyHTTPStatus(resp.StatusCode), fmt.Sprintf("API error: status code %d: %s", resp.StatusCode, truncateBytes(body, 500)), nil)
 	}
 
 	result, err := l.Provider.ParseResponse(body)
@@ -858,8 +858,16 @@ func (l *LLMImpl) Stream(ctx context.Context, prompt *Prompt, opts ...StreamOpti
 			transient = true
 		} else {
 			code := resp.StatusCode
+			// Read the body BEFORE closing so the provider's error JSON (e.g. a
+			// 400 carrying context_length_exceeded, or a 429 detail) is
+			// diagnosable on the stream path too, then classify like non-streaming.
+			errBody, readErr := io.ReadAll(resp.Body)
 			resp.Body.Close()
-			streamErr = NewLLMError(ErrorTypeAPI, fmt.Sprintf("API error: status code %d", code), nil)
+			if readErr != nil {
+				errBody = nil
+			}
+			l.logger.Warn("API error", "provider", l.Provider.Name(), slog.Int("status", code), "body", string(errBody))
+			streamErr = NewLLMError(classifyHTTPStatus(code), fmt.Sprintf("API error: status code %d: %s", code, truncateBytes(errBody, 500)), nil)
 			transient = code == http.StatusRequestTimeout || code == http.StatusTooManyRequests || code >= 500
 		}
 
