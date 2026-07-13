@@ -277,7 +277,7 @@ func (p *OpenAIProvider) PrepareRequest(prompt string, options map[string]interf
 			}
 
 			// Handle regular function tools
-			if !options["strict_tools"].(bool) {
+			if strictTools, _ := options["strict_tools"].(bool); !strictTools {
 				openAITools = append(openAITools, map[string]interface{}{
 					"type": "function",
 					"function": map[string]interface{}{
@@ -313,9 +313,11 @@ func (p *OpenAIProvider) PrepareRequest(prompt string, options map[string]interf
 	// Create a merged copy of options to handle token parameters properly
 	mergedOptions := make(map[string]interface{})
 
-	// First add options from provider (p.options)
+	// First add options from provider (p.options). Exclude the same control/meta
+	// keys as the per-call loop below so provider-level defaults can't leak them
+	// into the body (e.g. a top-level strict_tools or images 400s the request).
 	for k, v := range p.options {
-		if k != "tools" && k != "tool_choice" && k != "system_prompt" {
+		if k != "tools" && k != "tool_choice" && k != "strict_tools" && k != "system_prompt" && k != "images" {
 			mergedOptions[k] = v
 		}
 	}
@@ -917,87 +919,51 @@ func (p *OpenAIProvider) SupportsStreaming() bool {
 	return true
 }
 
-// PrepareStreamRequest creates a request body for streaming API calls
+// PrepareStreamRequest creates a request body for streaming API calls.
+//
+// It reuses PrepareRequest (the non-stream flattened builder) so the two paths
+// stay in lockstep: tools are transformed into OpenAI shape with per-tool strict
+// mode, web_search tools are filtered, images are folded into multimodal
+// content, and tool_choice is stripped for models that reject it. Building the
+// body inline here instead would drift — an earlier version copied options
+// verbatim and leaked control keys (strict_tools, images) into the body, 400ing
+// tool-bearing single-turn streams. Mirrors PrepareStreamRequestWithMessages.
 func (p *OpenAIProvider) PrepareStreamRequest(prompt string, options map[string]interface{}) ([]byte, error) {
-	// Start with regular request preparation
-	requestBody := map[string]interface{}{
-		"model": p.model,
-		"messages": []map[string]string{
-			{"role": "user", "content": prompt},
-		},
-		"stream": true,
-	}
-
-	// Create a merged copy of options to handle token parameters properly
-	mergedOptions := make(map[string]interface{})
-
-	// First add options from provider (p.options)
-	for k, v := range p.options {
-		if k != "stream" { // Don't override stream setting
-			mergedOptions[k] = v
+	// Honor stream_usage from the per-call options, falling back to a
+	// provider-level default set via SetOption (mirrors the structured path).
+	_, perCall := options["stream_usage"]
+	includeUsage := streamIncludeUsage(options) // reads the per-call key (non-mutating)
+	if !perCall {
+		if v, ok := p.options["stream_usage"].(bool); ok {
+			includeUsage = v
 		}
 	}
-
-	// Then add options from the function parameters (may override provider options)
-	for k, v := range options {
-		if k != "stream" { // Don't override stream setting
-			mergedOptions[k] = v
-		}
+	body, err := p.PrepareRequest(prompt, options)
+	if err != nil {
+		return nil, err
 	}
-
-	// Handle max_tokens/max_completion_tokens conflict
-	// For models that need max_completion_tokens, ensure we use that and not max_tokens
-	if p.needsMaxCompletionTokens() {
-		if _, hasMaxTokens := mergedOptions["max_tokens"]; hasMaxTokens {
-			// Move max_tokens value to max_completion_tokens
-			mergedOptions["max_completion_tokens"] = mergedOptions["max_tokens"]
-			delete(mergedOptions, "max_tokens")
-		}
-	} else {
-		// For other models, ensure we use max_tokens and not max_completion_tokens
-		if _, hasMaxCompletionTokens := mergedOptions["max_completion_tokens"]; hasMaxCompletionTokens {
-			// Move max_completion_tokens value to max_tokens
-			mergedOptions["max_tokens"] = mergedOptions["max_completion_tokens"]
-			delete(mergedOptions, "max_completion_tokens")
-		}
+	var requestBody map[string]interface{}
+	if err := json.Unmarshal(body, &requestBody); err != nil {
+		return nil, err
 	}
-
-	// Handle reasoning_effort option
-	if !p.needsReasoningEffort() {
-		delete(mergedOptions, "reasoning_effort")
-	}
-
-	if p.needsNoTemperature() {
-		delete(mergedOptions, "temperature")
-	}
-
-	// Read (and consume) the flag before copying options into the body.
-	includeUsage := streamIncludeUsage(mergedOptions)
-
-	// Add merged options to the request
-	for k, v := range mergedOptions {
-		requestBody[k] = v
-	}
-
+	delete(requestBody, "stream_usage") // strip in case it leaked via provider defaults
+	requestBody["stream"] = true
 	if includeUsage {
 		// Final usage chunk (choices:[] + usage), parsed by ParseStreamResponseRich.
 		requestBody["stream_options"] = map[string]interface{}{"include_usage": true}
 	}
-
 	return json.Marshal(requestBody)
 }
 
 // streamIncludeUsage reports whether to request a trailing usage chunk
 // (stream_options.include_usage). Defaults true; set the "stream_usage" option
-// false for compat gateways that reject stream_options. The control key is
-// deleted so it never reaches the wire.
+// false for compat gateways that reject stream_options. Non-mutating: it only
+// reads the flag and leaves the caller's options map untouched. Callers strip
+// stream_usage from the marshaled body (it must never reach the wire).
 func streamIncludeUsage(options map[string]interface{}) bool {
 	include := true
-	if v, ok := options["stream_usage"]; ok {
-		if b, ok := v.(bool); ok {
-			include = b
-		}
-		delete(options, "stream_usage")
+	if v, ok := options["stream_usage"].(bool); ok {
+		include = v
 	}
 	return include
 }
@@ -1010,7 +976,7 @@ func (p *OpenAIProvider) PrepareStreamRequestWithMessages(messages []types.Memor
 	// Honor stream_usage from the per-call options, falling back to a
 	// provider-level default set via SetOption (mirrors the flattened path).
 	_, perCall := options["stream_usage"]
-	includeUsage := streamIncludeUsage(options) // consumes the per-call key
+	includeUsage := streamIncludeUsage(options) // reads the per-call key (non-mutating)
 	if !perCall {
 		if v, ok := p.options["stream_usage"].(bool); ok {
 			includeUsage = v
@@ -1262,7 +1228,7 @@ func (p *OpenAIProvider) PrepareRequestWithMessages(messages []types.MemoryMessa
 			}
 
 			// Handle regular function tools
-			if !options["strict_tools"].(bool) {
+			if strictTools, _ := options["strict_tools"].(bool); !strictTools {
 				openAITools = append(openAITools, map[string]interface{}{
 					"type": "function",
 					"function": map[string]interface{}{
@@ -1298,9 +1264,11 @@ func (p *OpenAIProvider) PrepareRequestWithMessages(messages []types.MemoryMessa
 	// Create a merged copy of options to handle token parameters properly
 	mergedOptions := make(map[string]interface{})
 
-	// First add options from provider (p.options)
+	// First add options from provider (p.options). Exclude the same control/meta
+	// keys as the per-call loop below so provider-level defaults can't leak them
+	// into the body (e.g. a top-level strict_tools or images 400s the request).
 	for k, v := range p.options {
-		if k != "tools" && k != "tool_choice" && k != "system_prompt" && k != "structured_messages" {
+		if k != "tools" && k != "tool_choice" && k != "strict_tools" && k != "system_prompt" && k != "structured_messages" && k != "images" {
 			mergedOptions[k] = v
 		}
 	}
@@ -1454,9 +1422,11 @@ func (p *OpenAIProvider) PrepareRequestWithMessagesAndSchema(messages []types.Me
 	// Create a merged copy of options to handle token parameters properly
 	mergedOptions := make(map[string]interface{})
 
-	// First add options from provider (p.options)
+	// First add options from provider (p.options). Exclude the same control/meta
+	// keys as the per-call loop below so provider-level defaults can't leak them
+	// into the body (e.g. a top-level strict_tools or images 400s the request).
 	for k, v := range p.options {
-		if k != "tools" && k != "tool_choice" && k != "system_prompt" && k != "structured_messages" {
+		if k != "tools" && k != "tool_choice" && k != "strict_tools" && k != "system_prompt" && k != "structured_messages" && k != "images" {
 			mergedOptions[k] = v
 		}
 	}
