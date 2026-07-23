@@ -22,6 +22,8 @@ type StreamChunk struct {
 	Kind          string         // primary signal: "text" | "usage" | "finish" | "tool_call_delta"
 	FinishReason  string         // provider stop/finish reason (set on finish chunks)
 	Usage         *TokenUsage    // token usage, when the provider reports it mid/end of stream
+	Model         string         // model the provider says served this chunk; the resolved one, which a gateway or moving alias prices differently from the requested one (empty when unreported)
+	ServiceTier   string         // tier the request was served on ("standard", "priority", "batch", …), which multiplies every token's price (empty when unreported)
 	ToolCallDelta *ToolCallDelta // incremental tool-call fragment (set when Kind == "tool_call_delta")
 	// ExtraToolCallDeltas carries additional fragments when one chunk opens
 	// multiple parallel calls; the loop emits them as subsequent tokens.
