@@ -24,7 +24,8 @@ func (p *scriptedRichProvider) ParseStreamResponseRich(chunk []byte) (types.Stre
 
 func newStreamFromSSE(provider providers.Provider, sse string) *providerStream {
 	return newProviderStream(io.NopCloser(strings.NewReader(sse)), provider,
-		&StreamConfig{MaxLineSize: DefaultSSEMaxLineSize})
+		&StreamConfig{MaxLineSize: DefaultSSEMaxLineSize},
+		func(UsageOutcome, string, string, types.TokenUsage) {})
 }
 
 // Fix #1: tool_choice map → strategy string.

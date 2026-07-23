@@ -82,6 +82,13 @@ type LLMImpl struct {
 	config       *config.Config         // Configuration settings
 	MaxRetries   int                    // Maximum number of retry attempts
 	RetryDelay   time.Duration          // Delay between retry attempts
+
+	// usageObserver, if set, is fired once per billed provider round-trip — before schema validation
+	// or the retry decision — so callers can record token usage for every attempt, not just the one
+	// that ultimately succeeds. Guarded by usageMutex: it is expected to be set once at setup, but
+	// generation reads it from whatever goroutines the caller uses, so the access must be safe.
+	usageObserver UsageObserver
+	usageMutex    sync.RWMutex
 }
 
 // GenerateOption is a function type for configuring generation behavior.
@@ -120,14 +127,25 @@ func NewLLM(cfg *config.Config, logger utils.Logger, registry *providers.Provide
 
 	provider.SetDefaultOptions(cfg)
 
+	// A caller-supplied client is used verbatim (its own Timeout applies), so a custom
+	// RoundTripper can observe every provider request — including response headers, which body
+	// parsing cannot see.
+	httpClient := cfg.HTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: cfg.Timeout}
+	}
+
 	llmClient := &LLMImpl{
 		Provider:   provider,
-		client:     &http.Client{Timeout: cfg.Timeout},
+		client:     httpClient,
 		logger:     logger,
 		config:     cfg,
 		MaxRetries: cfg.MaxRetries,
 		RetryDelay: cfg.RetryDelay,
 		Options:    make(map[string]interface{}),
+		// Carried from the config so accounting reaches clients the caller never holds — the
+		// per-model and aggregator clients inside MOA, and the per-case clients in assess.
+		usageObserver: cfg.UsageObserver,
 	}
 
 	return llmClient, nil
@@ -141,6 +159,107 @@ func (l *LLMImpl) SetOption(key string, value interface{}) {
 
 	l.Options[key] = value
 	l.logger.Debug("Option set", key, value)
+}
+
+// SetUsageObserver registers a hook fired once per billed provider round-trip — before schema
+// validation or the retry decision — so a caller can record token usage for every attempt, including
+// schema-rejected, unparseable, and retried ones, not just the attempt that ultimately succeeds.
+// See UsageObserver for the contract and UsageOutcome for the outcomes reported.
+//
+// Passing nil removes a previously registered observer. The result is always true: this is the leaf
+// implementation, so the observer is genuinely installed. Wrappers forward their inner result
+// instead — see UsageObservable.
+func (l *LLMImpl) SetUsageObserver(observer UsageObserver) bool {
+	l.usageMutex.Lock()
+	defer l.usageMutex.Unlock()
+	l.usageObserver = observer
+	return true
+}
+
+// usageObserverFn returns the registered observer, or nil.
+func (l *LLMImpl) usageObserverFn() UsageObserver {
+	l.usageMutex.RLock()
+	defer l.usageMutex.RUnlock()
+	return l.usageObserver
+}
+
+// reportUsage fires the usage observer for one billed provider round-trip.
+//
+// Usage is taken from the provider's parsed details when it supplied them, and otherwise recovered
+// from the raw response body — that fallback is what makes the unparseable-response and
+// no-usage-reported cases recordable instead of silent. The event is delivered even when no usage
+// could be determined at all, because an unaccountable billed call is itself worth recording.
+func (l *LLMImpl) reportUsage(ctx context.Context, attempt int, outcome UsageOutcome, details *types.ResponseDetails, body []byte) {
+	observer := l.usageObserverFn()
+	if observer == nil {
+		return
+	}
+
+	usage := types.TokenUsage{}
+	model := ""
+	tier := ""
+	if details != nil {
+		usage = details.TokenUsage
+		model = details.Model
+		tier = details.ServiceTier
+	}
+	// Fall back to the raw body only when the provider's parser gave us nothing — one pass,
+	// recovering the counts and the tier together. The tier multiplies the price of whatever
+	// the counts turn out to be, so a parse failure needs both; a successful parse needs
+	// neither, and re-reading the body there would put a second full decode of every response
+	// on the generation path for the providers that never report a tier at all.
+	if usage.IsZero() && len(body) > 0 {
+		recovered, recoveredTier, _ := ExtractUsageAndTier(body)
+		if !recovered.IsZero() {
+			usage = recovered
+		}
+		if tier == "" {
+			tier = recoveredTier
+		}
+	}
+	if model == "" && l.config != nil {
+		model = l.config.Model
+	}
+
+	l.deliverUsage(ctx, observer, UsageEvent{
+		Provider:    l.Provider.Name(),
+		Model:       model,
+		Outcome:     outcome,
+		Attempt:     attempt,
+		Usage:       usage,
+		ServiceTier: tier,
+		Details:     details,
+	})
+}
+
+// logUsage emits the debug lines describing a round-trip's token usage. Tolerates nil details, which
+// is what providers that report no usage of their own return.
+func (l *LLMImpl) logUsage(details *types.ResponseDetails) {
+	if details == nil {
+		return
+	}
+	u := details.TokenUsage
+	l.logger.Debug("Token usage", "prompt_tokens", u.PromptTokens, "completion_tokens", u.CompletionTokens, "total_tokens", u.TotalTokens)
+	if u.CacheReadInputTokens > 0 || u.CacheCreationInputTokens > 0 || u.CachedPromptTokens > 0 {
+		l.logger.Debug("Cache usage", "cache_creation_tokens", u.CacheCreationInputTokens, "cache_read_tokens", u.CacheReadInputTokens, "cached_prompt_tokens", u.CachedPromptTokens)
+	}
+	if u.ReasoningTokens > 0 {
+		l.logger.Debug("Reasoning usage", "reasoning_tokens", u.ReasoningTokens)
+	}
+	if details.ID != "" {
+		l.logger.Debug("Response ID", "id", details.ID)
+	}
+}
+
+// deliverUsage invokes the observer, containing a panicking recorder so it cannot take down the
+// generation it was only meant to measure.
+func (l *LLMImpl) deliverUsage(ctx context.Context, observer UsageObserver, event UsageEvent) {
+	defer func() {
+		if r := recover(); r != nil {
+			l.logger.Error("Usage observer panicked", "panic", r, "provider", event.Provider, "outcome", string(event.Outcome))
+		}
+	}()
+	observer(ctx, event)
 }
 
 // SetEndpoint updates the API endpoint for the provider.
@@ -192,7 +311,7 @@ func (l *LLMImpl) Generate(ctx context.Context, prompt *Prompt, opts ...Generate
 	for attempt := 0; attempt <= l.MaxRetries; attempt++ {
 		l.logger.Debug("Generating text", "provider", l.Provider.Name(), "prompt", prompt.String(), "system_prompt", prompt.SystemPrompt, "attempt", attempt+1)
 		// Pass the entire Prompt struct to attemptGenerate
-		result, err := l.attemptGenerate(ctx, prompt)
+		result, err := l.attemptGenerate(ctx, prompt, attempt)
 		if err == nil {
 			return result, nil
 		}
@@ -233,7 +352,10 @@ func (l *LLMImpl) waitFor(ctx context.Context, d time.Duration) error {
 //   - ErrorTypeAPI for provider API errors
 //   - ErrorTypeResponse for response processing issues
 //   - ErrorTypeRateLimit if provider rate limit is exceeded
-func (l *LLMImpl) attemptGenerate(ctx context.Context, prompt *Prompt) (string, error) {
+//
+// attempt is the zero-based retry index, reported to the usage observer so a recorder can
+// distinguish a first-try success from the tokens burned on a third paid attempt.
+func (l *LLMImpl) attemptGenerate(ctx context.Context, prompt *Prompt, attempt int) (string, error) {
 	// Create a new options map that includes both l.Options and prompt-specific options
 	options := make(map[string]interface{})
 
@@ -318,35 +440,19 @@ func (l *LLMImpl) attemptGenerate(ctx context.Context, prompt *Prompt) (string, 
 		return "", NewLLMError(classifyHTTPStatus(resp.StatusCode), fmt.Sprintf("API error: status code %d: %s", resp.StatusCode, truncateBytes(body, 500)), nil)
 	}
 
-	// Extract and log caching information
-	var fullResponse map[string]interface{}
-	if err := json.Unmarshal(body, &fullResponse); err != nil {
-		// Try parsing as JSONL if JSON parsing fails
-		lines := bytes.Split(bytes.TrimSpace(body), []byte("\n"))
-		if len(lines) > 0 {
-			// the last line is *usually* the full response
-			if err := json.Unmarshal(lines[len(lines)-1], &fullResponse); err != nil {
-				l.logger.Warn("Failed to parse response as both JSON and JSONL", "error", err)
-			}
-		}
-	}
-
-	// Process usage information regardless of format
-	if usage, ok := fullResponse["usage"].(map[string]interface{}); ok {
-		l.logger.Debug("Usage information", "usage", usage)
-		cacheInfo := map[string]interface{}{
-			"cache_creation_input_tokens": usage["cache_creation_input_tokens"],
-			"cache_read_input_tokens":     usage["cache_read_input_tokens"],
-		}
-		l.logger.Debug("Cache information", "info", cacheInfo)
-	} else {
-		l.logger.Debug("Cache information not available in the response")
-	}
-
-	result, err := l.Provider.ParseResponse(body)
+	// Parse through the usage-bearing path even though this entrypoint discards the details: the
+	// round-trip is billed either way, and Generate is the busiest entrypoint in the library, so
+	// skipping the accounting here would leave most spend unrecorded. Every provider's
+	// ParseResponseWithUsage returns the same text as ParseResponse.
+	result, details, err := l.Provider.ParseResponseWithUsage(body)
 	if err != nil {
+		// A billed 200 whose content wouldn't parse — recover usage from the raw body.
+		l.reportUsage(ctx, attempt, UsageOutcomeParseFail, nil, body)
 		return "", NewLLMError(ErrorTypeResponse, "failed to parse response", err)
 	}
+	l.logUsage(details)
+	l.reportUsage(ctx, attempt, UsageOutcomeSuccess, details, body)
+
 	l.logger.Debug("Text generated successfully", "result", result)
 	return result, nil
 }
@@ -370,7 +476,7 @@ func (l *LLMImpl) GenerateWithSchema(ctx context.Context, prompt *Prompt, schema
 	for attempt := 0; attempt <= l.MaxRetries; attempt++ {
 		l.logger.Debug("Generating text with schema", "provider", l.Provider.Name(), "prompt", prompt.String(), "attempt", attempt+1)
 
-		result, _, lastErr = l.attemptGenerateWithSchema(ctx, prompt, schema)
+		result, _, lastErr = l.attemptGenerateWithSchema(ctx, prompt, schema, attempt)
 		if lastErr == nil {
 			return result, nil
 		}
@@ -394,6 +500,10 @@ func (l *LLMImpl) GenerateWithSchema(ctx context.Context, prompt *Prompt, schema
 // GenerateWithUsage produces text based on the given prompt and returns token usage information.
 // It handles retries, logging, and error management similar to Generate, but also extracts usage data.
 //
+// The returned details describe only the attempt that succeeded. When a retry occurs, earlier
+// attempts were billed too and are not reflected here — register a UsageObserver via
+// SetUsageObserver to account for every attempt.
+//
 // Returns:
 //   - Generated text response
 //   - Response details (or nil if not available)
@@ -414,7 +524,7 @@ func (l *LLMImpl) GenerateWithUsage(ctx context.Context, prompt *Prompt, opts ..
 	for attempt := 0; attempt <= l.MaxRetries; attempt++ {
 		l.logger.Debug("Generating text with usage tracking", "provider", l.Provider.Name(), "prompt", prompt.String(), "attempt", attempt+1)
 
-		result, details, lastErr = l.attemptGenerateWithUsage(ctx, prompt)
+		result, details, lastErr = l.attemptGenerateWithUsage(ctx, prompt, attempt)
 		if lastErr == nil {
 			return result, details, nil
 		}
@@ -432,6 +542,9 @@ func (l *LLMImpl) GenerateWithUsage(ctx context.Context, prompt *Prompt, opts ..
 
 // GenerateWithSchemaAndUsage generates text conforming to a schema and returns response details.
 // This combines schema validation with usage tracking.
+//
+// As with GenerateWithUsage, the returned details cover only the successful attempt. Schema
+// rejections are billed and retried; register a UsageObserver to see them.
 //
 // Returns:
 //   - Generated text response
@@ -451,7 +564,7 @@ func (l *LLMImpl) GenerateWithSchemaAndUsage(ctx context.Context, prompt *Prompt
 	for attempt := 0; attempt <= l.MaxRetries; attempt++ {
 		l.logger.Debug("Generating text with schema and usage tracking", "provider", l.Provider.Name(), "prompt", prompt.String(), "attempt", attempt+1)
 
-		result, details, _, lastErr = l.attemptGenerateWithSchemaAndUsage(ctx, prompt, schema)
+		result, details, _, lastErr = l.attemptGenerateWithSchemaAndUsage(ctx, prompt, schema, attempt)
 		if lastErr == nil {
 			return result, details, nil
 		}
@@ -474,7 +587,9 @@ func (l *LLMImpl) GenerateWithSchemaAndUsage(ctx context.Context, prompt *Prompt
 //   - Generated text response
 //   - Response details (or nil if not available)
 //   - Any error encountered during the attempt
-func (l *LLMImpl) attemptGenerateWithUsage(ctx context.Context, prompt *Prompt) (string, *types.ResponseDetails, error) {
+//
+// attempt is the zero-based retry index, reported to the usage observer.
+func (l *LLMImpl) attemptGenerateWithUsage(ctx context.Context, prompt *Prompt, attempt int) (string, *types.ResponseDetails, error) {
 	// Create a new options map that includes both l.Options and prompt-specific options
 	options := make(map[string]interface{})
 
@@ -560,19 +675,15 @@ func (l *LLMImpl) attemptGenerateWithUsage(ctx context.Context, prompt *Prompt) 
 	// Try to use ParseResponseWithUsage if available
 	result, details, err := l.Provider.ParseResponseWithUsage(body)
 	if err != nil {
+		// The 200 was billed even though its content wouldn't parse (a max_tokens-truncated
+		// response with no content blocks is the common case). Recover usage from the raw body
+		// so the tokens are recorded before the retry loop pays for another attempt.
+		l.reportUsage(ctx, attempt, UsageOutcomeParseFail, nil, body)
 		return "", nil, NewLLMError(ErrorTypeResponse, "failed to parse response", err)
 	}
 
-	if details != nil {
-		l.logger.Debug("Token usage", "prompt_tokens", details.TokenUsage.PromptTokens, "completion_tokens", details.TokenUsage.CompletionTokens, "total_tokens", details.TokenUsage.TotalTokens)
-		if details.TokenUsage.CacheReadInputTokens > 0 || details.TokenUsage.CacheCreationInputTokens > 0 {
-			l.logger.Debug("Cache usage", "cache_creation_tokens", details.TokenUsage.CacheCreationInputTokens, "cache_read_tokens", details.TokenUsage.CacheReadInputTokens)
-		}
-		if details.ID != "" {
-			l.logger.Debug("Response ID", "id", details.ID)
-		}
-	}
-
+	l.logUsage(details)
+	l.reportUsage(ctx, attempt, UsageOutcomeSuccess, details, body)
 	l.logger.Debug("Text generated successfully", "result", result)
 	return result, details, nil
 }
@@ -630,7 +741,9 @@ func (l *LLMImpl) prepareSchemaRequestBody(prompt *Prompt, schema interface{}) (
 //   - Response details (or nil if not available)
 //   - Full prompt used for generation
 //   - Any error encountered during the attempt
-func (l *LLMImpl) attemptGenerateWithSchemaAndUsage(ctx context.Context, prompt *Prompt, schema interface{}) (string, *types.ResponseDetails, string, error) {
+//
+// attempt is the zero-based retry index, reported to the usage observer.
+func (l *LLMImpl) attemptGenerateWithSchemaAndUsage(ctx context.Context, prompt *Prompt, schema interface{}, attempt int) (string, *types.ResponseDetails, string, error) {
 	reqBody, fullPrompt, err := l.prepareSchemaRequestBody(prompt, schema)
 	if err != nil {
 		return "", nil, fullPrompt, NewLLMError(ErrorTypeRequest, "failed to prepare request", err)
@@ -669,24 +782,21 @@ func (l *LLMImpl) attemptGenerateWithSchemaAndUsage(ctx context.Context, prompt 
 	// Try to use ParseResponseWithUsage
 	result, details, err := l.Provider.ParseResponseWithUsage(body)
 	if err != nil {
+		l.reportUsage(ctx, attempt, UsageOutcomeParseFail, nil, body)
 		return "", nil, fullPrompt, NewLLMError(ErrorTypeResponse, "failed to parse response", err)
 	}
 
 	// Validate the result against the schema
 	if err := ValidateAgainstSchema(result, schema); err != nil {
+		// The response was billed (usage parsed above) even though it failed schema validation;
+		// report it before discarding so recording isn't coupled to the success path — this is the
+		// attempt whose tokens the retry loop would otherwise throw away.
+		l.reportUsage(ctx, attempt, UsageOutcomeSchemaFail, details, body)
 		return "", nil, fullPrompt, NewLLMError(ErrorTypeResponse, "response does not match schema", err)
 	}
 
-	if details != nil {
-		l.logger.Debug("Token usage", "prompt_tokens", details.TokenUsage.PromptTokens, "completion_tokens", details.TokenUsage.CompletionTokens, "total_tokens", details.TokenUsage.TotalTokens)
-		if details.TokenUsage.CacheReadInputTokens > 0 || details.TokenUsage.CacheCreationInputTokens > 0 {
-			l.logger.Debug("Cache usage", "cache_creation_tokens", details.TokenUsage.CacheCreationInputTokens, "cache_read_tokens", details.TokenUsage.CacheReadInputTokens)
-		}
-		if details.ID != "" {
-			l.logger.Debug("Response ID", "id", details.ID)
-		}
-	}
-
+	l.logUsage(details)
+	l.reportUsage(ctx, attempt, UsageOutcomeSuccess, details, body)
 	l.logger.Debug("Text generated successfully", "result", result)
 	return result, details, fullPrompt, nil
 }
@@ -699,7 +809,9 @@ func (l *LLMImpl) attemptGenerateWithSchemaAndUsage(ctx context.Context, prompt 
 //   - Full prompt used for generation
 //   - ErrorTypeInvalidInput for schema validation failures
 //   - Other error types as per attemptGenerate
-func (l *LLMImpl) attemptGenerateWithSchema(ctx context.Context, prompt *Prompt, schema interface{}) (string, string, error) {
+//
+// attempt is the zero-based retry index, reported to the usage observer.
+func (l *LLMImpl) attemptGenerateWithSchema(ctx context.Context, prompt *Prompt, schema interface{}, attempt int) (string, string, error) {
 	reqBody, fullPrompt, err := l.prepareSchemaRequestBody(prompt, schema)
 	if err != nil {
 		return "", fullPrompt, NewLLMError(ErrorTypeRequest, "failed to prepare request", err)
@@ -736,16 +848,23 @@ func (l *LLMImpl) attemptGenerateWithSchema(ctx context.Context, prompt *Prompt,
 		return "", fullPrompt, NewLLMError(classifyHTTPStatus(resp.StatusCode), fmt.Sprintf("API error: status code %d: %s", resp.StatusCode, truncateBytes(body, 500)), nil)
 	}
 
-	result, err := l.Provider.ParseResponse(body)
+	// Parse through the usage-bearing path even though this entrypoint discards the details, so
+	// schema-rejected and unparseable attempts are accounted for here exactly as they are in
+	// attemptGenerateWithSchemaAndUsage. Both are billed and both are retried.
+	result, details, err := l.Provider.ParseResponseWithUsage(body)
 	if err != nil {
+		l.reportUsage(ctx, attempt, UsageOutcomeParseFail, nil, body)
 		return "", fullPrompt, NewLLMError(ErrorTypeResponse, "failed to parse response", err)
 	}
 
 	// Validate the result against the schema
 	if err := ValidateAgainstSchema(result, schema); err != nil {
+		l.reportUsage(ctx, attempt, UsageOutcomeSchemaFail, details, body)
 		return "", fullPrompt, NewLLMError(ErrorTypeResponse, "response does not match schema", err)
 	}
 
+	l.logUsage(details)
+	l.reportUsage(ctx, attempt, UsageOutcomeSuccess, details, body)
 	l.logger.Debug("Text generated successfully", "result", result)
 	return result, fullPrompt, nil
 }
@@ -763,6 +882,19 @@ func (l *LLMImpl) preparePromptWithSchema(prompt string, schema interface{}) str
 }
 
 // Stream initiates a streaming response from the LLM.
+//
+// The caller must Close the returned stream. Close releases the underlying HTTP response body, and
+// it is the backstop that reports token usage for a stream the caller walks away from: usage is
+// reported automatically when the stream reaches its end, errors, or has its context cancelled, but
+// a stream simply dropped mid-flight has no other moment at which to report. The provider billed for
+// whatever it generated regardless, so a dropped stream without a Close is spend that no
+// UsageObserver will ever see. Closing an already-finished stream is safe and does not double-count.
+//
+//	stream, err := client.Stream(ctx, prompt)
+//	if err != nil {
+//		return err
+//	}
+//	defer stream.Close()
 func (l *LLMImpl) Stream(ctx context.Context, prompt *Prompt, opts ...StreamOption) (TokenStream, error) {
 	if !l.SupportsStreaming() {
 		return nil, NewLLMError(ErrorTypeUnsupported, "streaming not supported by provider", nil)
@@ -880,8 +1012,36 @@ func (l *LLMImpl) Stream(ctx context.Context, prompt *Prompt, opts ...StreamOpti
 		}
 	}
 
-	// Create and return stream
-	return newProviderStream(resp.Body, l.Provider, config), nil
+	// Create and return stream. The stream reports its accumulated usage when it ends — the
+	// request is billed for whatever it generated even if the consumer abandons it mid-flight.
+	report := func(outcome UsageOutcome, model, serviceTier string, usage types.TokenUsage) {
+		l.reportStreamUsage(ctx, outcome, model, serviceTier, usage)
+	}
+	return newProviderStream(resp.Body, l.Provider, config, report), nil
+}
+
+// reportStreamUsage fires the usage observer for a completed or abandoned stream. Usage is the
+// accumulator's total rather than a parsed body, so there is no response detail to attach.
+//
+// model is what the stream's own chunks said served it, which is the resolved model rather than the
+// requested one — the two differ for gateways and moving aliases, and they are priced differently.
+// It falls back to the configured model only when the provider named none, or when the stream was
+// abandoned before any chunk arrived.
+func (l *LLMImpl) reportStreamUsage(ctx context.Context, outcome UsageOutcome, model, serviceTier string, usage types.TokenUsage) {
+	observer := l.usageObserverFn()
+	if observer == nil {
+		return
+	}
+	if model == "" && l.config != nil {
+		model = l.config.Model
+	}
+	l.deliverUsage(ctx, observer, UsageEvent{
+		Provider:    l.Provider.Name(),
+		Model:       model,
+		Outcome:     outcome,
+		Usage:       usage,
+		ServiceTier: serviceTier,
+	})
 }
 
 // SupportsStreaming checks if the provider supports streaming responses.
@@ -903,11 +1063,21 @@ type providerStream struct {
 	closer           io.Closer // underlying response body; closed by Close()
 	config           *StreamConfig
 	currentIndex     int
+	usageMutex       sync.RWMutex           // guards usage/model/reachedEnd; read from another goroutine
 	usage            types.TokenUsage       // running total, merged across chunks (see mergeUsage)
+	model            string                 // model the provider says served the stream, when it says
+	serviceTier      string                 // tier the stream was served on, when the provider says
 	pendingToolCalls []*types.ToolCallDelta // extra parallel tool-call fragments, drained one per Next
+	reachedEnd       bool                   // the stream produced its terminal event, so usage is final
+
+	// reportUsage delivers the accumulated total once the stream ends, however it ends. A stream is
+	// billed for what it generated even when the consumer walks away mid-flight, so reporting is
+	// driven by termination rather than by the consumer reading to completion.
+	reportUsage  func(outcome UsageOutcome, model, serviceTier string, usage types.TokenUsage)
+	reportedOnce sync.Once
 }
 
-func newProviderStream(reader io.ReadCloser, provider providers.Provider, config *StreamConfig) *providerStream {
+func newProviderStream(reader io.ReadCloser, provider providers.Provider, config *StreamConfig, report func(outcome UsageOutcome, model, serviceTier string, usage types.TokenUsage)) *providerStream {
 	var decoder StreamDecoder
 	if provider.Name() == "ollama" {
 		decoder = NewNDJSONDecoder(reader)
@@ -921,7 +1091,60 @@ func newProviderStream(reader io.ReadCloser, provider providers.Provider, config
 		closer:       reader,
 		config:       config,
 		currentIndex: 0,
+		reportUsage:  report,
 	}
+}
+
+// Usage returns the token usage accumulated so far. It is final once the stream has returned io.EOF
+// and is a partial (possibly zero) count before that — providers report usage at the end, and some
+// only when asked to. Safe to call from another goroutine.
+//
+// TotalTokens is filled in from the components, because the streaming shapes that break input into
+// cached and uncached parts (Anthropic) send no total of their own at any point.
+func (s *providerStream) Usage() types.TokenUsage {
+	s.usageMutex.RLock()
+	defer s.usageMutex.RUnlock()
+	usage := s.usage
+	usage.TotalTokens = usage.ComputedTotal()
+	return usage
+}
+
+// ServiceTier returns the tier the provider says it served this stream on, or empty when it said
+// nothing. It scales the price of everything Usage reports. Safe to call from another goroutine.
+func (s *providerStream) ServiceTier() string {
+	s.usageMutex.RLock()
+	defer s.usageMutex.RUnlock()
+	return s.serviceTier
+}
+
+// endOfStream marks the stream as having reached its terminal event, reports the final usage, and
+// returns the io.EOF the caller propagates.
+func (s *providerStream) endOfStream() error {
+	s.usageMutex.Lock()
+	s.reachedEnd = true
+	s.usageMutex.Unlock()
+	s.finish()
+	return io.EOF
+}
+
+// finish reports the stream's accumulated usage exactly once, whether it ended at its terminal
+// event, at a mid-stream error, or at an early Close by the consumer.
+func (s *providerStream) finish() {
+	s.reportedOnce.Do(func() {
+		if s.reportUsage == nil {
+			return
+		}
+		s.usageMutex.RLock()
+		model, tier, ended := s.model, s.serviceTier, s.reachedEnd
+		s.usageMutex.RUnlock()
+		usage := s.Usage()
+
+		outcome := UsageOutcomeStreamAborted
+		if ended {
+			outcome = UsageOutcomeStream
+		}
+		s.reportUsage(outcome, model, tier, usage)
+	})
 }
 
 // mergeUsage overwrites dst per non-zero field. Providers report usage
@@ -943,6 +1166,33 @@ func mergeUsage(dst *types.TokenUsage, src types.TokenUsage) {
 	if src.CacheReadInputTokens > 0 {
 		dst.CacheReadInputTokens = src.CacheReadInputTokens
 	}
+	if src.CachedPromptTokens > 0 {
+		dst.CachedPromptTokens = src.CachedPromptTokens
+	}
+	if src.ReasoningTokens > 0 {
+		dst.ReasoningTokens = src.ReasoningTokens
+	}
+	if src.CacheCreation5mInputTokens > 0 {
+		dst.CacheCreation5mInputTokens = src.CacheCreation5mInputTokens
+	}
+	if src.CacheCreation1hInputTokens > 0 {
+		dst.CacheCreation1hInputTokens = src.CacheCreation1hInputTokens
+	}
+	if src.CacheWritePromptTokens > 0 {
+		dst.CacheWritePromptTokens = src.CacheWritePromptTokens
+	}
+	if src.AcceptedPredictionTokens > 0 {
+		dst.AcceptedPredictionTokens = src.AcceptedPredictionTokens
+	}
+	if src.RejectedPredictionTokens > 0 {
+		dst.RejectedPredictionTokens = src.RejectedPredictionTokens
+	}
+	if src.AudioPromptTokens > 0 {
+		dst.AudioPromptTokens = src.AudioPromptTokens
+	}
+	if src.AudioCompletionTokens > 0 {
+		dst.AudioCompletionTokens = src.AudioCompletionTokens
+	}
 }
 
 // toolCallToken builds a tool_call_delta StreamToken and advances the index.
@@ -957,6 +1207,11 @@ func (s *providerStream) Next(ctx context.Context) (*StreamToken, error) {
 	for {
 		select {
 		case <-ctx.Done():
+			// Cancellation is the usual way a stream ends early — a request timeout, a
+			// disconnected client, a dying parent context — and the provider has already
+			// generated and billed whatever arrived before it. Report here rather than
+			// leaving it to Close, which the caller is under no obligation to call.
+			s.finish()
 			return nil, ctx.Err()
 		default:
 			// Drain buffered parallel tool-call fragments first.
@@ -970,9 +1225,11 @@ func (s *providerStream) Next(ctx context.Context) (*StreamToken, error) {
 				if err := s.decoder.Err(); err != nil {
 					// Surfaced to the caller; not retried in place (body is
 					// already partially consumed — re-invoke Stream to retry).
+					// Whatever the provider generated before the break is billed.
+					s.finish()
 					return nil, err
 				}
-				return nil, io.EOF
+				return nil, s.endOfStream()
 			}
 
 			event := s.decoder.Event()
@@ -988,9 +1245,11 @@ func (s *providerStream) Next(ctx context.Context) (*StreamToken, error) {
 						continue
 					}
 					if err == io.EOF {
-						return nil, io.EOF
+						return nil, s.endOfStream()
 					}
-					// Genuine parse/API error — surface it instead of swallowing.
+					// Genuine parse/API error — surface it instead of swallowing, after
+					// recording what the stream had already been billed for.
+					s.finish()
 					return nil, err
 				}
 				// Buffer any additional parallel tool-call fragments to emit next.
@@ -1005,21 +1264,40 @@ func (s *providerStream) Next(ctx context.Context) (*StreamToken, error) {
 				if chunk.ToolCallDelta != nil {
 					token.ToolCallDelta = chunk.ToolCallDelta
 				}
-				if chunk.Usage != nil {
-					mergeUsage(&s.usage, *chunk.Usage)
+				if chunk.Usage != nil || chunk.Model != "" || chunk.ServiceTier != "" {
+					s.usageMutex.Lock()
+					if chunk.Usage != nil {
+						mergeUsage(&s.usage, *chunk.Usage)
+					}
+					if chunk.Model != "" {
+						s.model = chunk.Model
+					}
+					if chunk.ServiceTier != "" {
+						s.serviceTier = chunk.ServiceTier
+					}
+					s.usageMutex.Unlock()
 				}
 				if chunk.Usage != nil || chunk.FinishReason != "" {
-					u := s.usage
+					u := s.Usage()
 					total := u.TotalTokens
-					if total == 0 {
-						total = u.PromptTokens + u.CompletionTokens
-					}
 					token.Metadata = map[string]interface{}{
-						"prompt_tokens":               u.PromptTokens,
-						"completion_tokens":           u.CompletionTokens,
-						"total_tokens":                total,
-						"cache_creation_input_tokens": u.CacheCreationInputTokens,
-						"cache_read_input_tokens":     u.CacheReadInputTokens,
+						"prompt_tokens":                  u.PromptTokens,
+						"completion_tokens":              u.CompletionTokens,
+						"total_tokens":                   total,
+						"cache_creation_input_tokens":    u.CacheCreationInputTokens,
+						"cache_read_input_tokens":        u.CacheReadInputTokens,
+						"cached_prompt_tokens":           u.CachedPromptTokens,
+						"reasoning_tokens":               u.ReasoningTokens,
+						"cache_creation_5m_input_tokens": u.CacheCreation5mInputTokens,
+						"cache_creation_1h_input_tokens": u.CacheCreation1hInputTokens,
+						"cache_write_prompt_tokens":      u.CacheWritePromptTokens,
+						"accepted_prediction_tokens":     u.AcceptedPredictionTokens,
+						"rejected_prediction_tokens":     u.RejectedPredictionTokens,
+						"audio_prompt_tokens":            u.AudioPromptTokens,
+						"audio_completion_tokens":        u.AudioCompletionTokens,
+					}
+					if s.ServiceTier() != "" {
+						token.Metadata["service_tier"] = s.ServiceTier()
 					}
 					if chunk.FinishReason != "" {
 						token.Metadata["finish_reason"] = chunk.FinishReason
@@ -1036,7 +1314,7 @@ func (s *providerStream) Next(ctx context.Context) (*StreamToken, error) {
 					continue
 				}
 				if err == io.EOF {
-					return nil, io.EOF
+					return nil, s.endOfStream()
 				}
 				continue // Not enough data or malformed
 			}
@@ -1053,7 +1331,11 @@ func (s *providerStream) Next(ctx context.Context) (*StreamToken, error) {
 	}
 }
 
+// Close releases the underlying response body and reports usage if the stream never reached its
+// terminal event — a consumer that stops early still pays for what was generated. Reporting is
+// once-only, so closing a fully consumed stream does not double-count it.
 func (s *providerStream) Close() error {
+	s.finish()
 	if s.closer != nil {
 		return s.closer.Close()
 	}

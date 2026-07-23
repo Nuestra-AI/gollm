@@ -38,7 +38,14 @@ type TokenStream interface {
 	// When the stream is finished, it returns io.EOF.
 	Next(context.Context) (*StreamToken, error)
 
-	// Close releases any resources associated with the stream.
+	// Streams returned by this package also report accumulated token usage, via the
+	// optional UsageReporter capability — read it with StreamUsage(stream). It is kept
+	// off this interface so external implementations of TokenStream keep compiling.
+
+	// Close releases any resources associated with the stream, and reports the token usage
+	// of a stream that ended without being read to completion. Every caller must Close;
+	// a stream that is simply dropped never reports the tokens it was billed for. Closing
+	// a finished stream is safe and does not double-count.
 	io.Closer
 }
 

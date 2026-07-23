@@ -115,6 +115,8 @@ func (l *MockLLM) SetOption(key string, value interface{}) {
 		}
 	}
 }
+
+func (l *MockLLM) SetUsageObserver(UsageObserver) bool { return true }
 func (l *MockLLM) SetLogLevel(level utils.LogLevel) {}
 func (l *MockLLM) SetEndpoint(endpoint string)      {}
 func (l *MockLLM) NewPrompt(input string) *Prompt   { return &Prompt{Input: input} }
