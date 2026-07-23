@@ -328,13 +328,69 @@ func (p *BedrockProvider) PrepareRequestWithSchema(prompt string, options map[st
 }
 
 // ParseResponse extracts the generated text from the Bedrock API response.
-// ParseResponseWithUsage extracts both the generated text and response details from the Bedrock API response.
+// ParseResponseWithUsage extracts both the generated text and response details from the Bedrock
+// API response.
+//
+// Each model family reports its counts under different keys — Anthropic uses a usage object,
+// Meta and Cohere put counts at the top level, and Amazon Titan nests them under
+// inputTextTokenCount/results — so usage is normalized per family here.
 func (p *BedrockProvider) ParseResponseWithUsage(body []byte) (string, *types.ResponseDetails, error) {
 	content, err := p.ParseResponse(body)
 	if err != nil {
 		return "", nil, err
 	}
-	return content, nil, nil
+	return content, &types.ResponseDetails{Model: p.model, TokenUsage: p.parseUsage(body)}, nil
+}
+
+// parseUsage normalizes token counts across the Bedrock model families. Unknown keys decode to
+// zero, so one pass covers every family; a family that reports nothing yields zero usage.
+func (p *BedrockProvider) parseUsage(body []byte) types.TokenUsage {
+	var wire struct {
+		// Anthropic on Bedrock.
+		Usage struct {
+			InputTokens              int `json:"input_tokens"`
+			OutputTokens             int `json:"output_tokens"`
+			CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+			CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+		} `json:"usage"`
+		// Meta (Llama).
+		PromptTokenCount     int `json:"prompt_token_count"`
+		GenerationTokenCount int `json:"generation_token_count"`
+		// Amazon Titan.
+		InputTextTokenCount int `json:"inputTextTokenCount"`
+		Results             []struct {
+			TokenCount int `json:"tokenCount"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(body, &wire); err != nil {
+		return types.TokenUsage{}
+	}
+
+	usage := types.TokenUsage{
+		PromptTokens:             wire.Usage.InputTokens,
+		CompletionTokens:         wire.Usage.OutputTokens,
+		CacheCreationInputTokens: wire.Usage.CacheCreationInputTokens,
+		CacheReadInputTokens:     wire.Usage.CacheReadInputTokens,
+	}
+	if usage.PromptTokens == 0 {
+		switch {
+		case wire.PromptTokenCount > 0:
+			usage.PromptTokens = wire.PromptTokenCount
+		case wire.InputTextTokenCount > 0:
+			usage.PromptTokens = wire.InputTextTokenCount
+		}
+	}
+	if usage.CompletionTokens == 0 {
+		if wire.GenerationTokenCount > 0 {
+			usage.CompletionTokens = wire.GenerationTokenCount
+		} else {
+			for _, r := range wire.Results {
+				usage.CompletionTokens += r.TokenCount
+			}
+		}
+	}
+	usage.TotalTokens = usage.ComputedTotal()
+	return usage
 }
 
 func (p *BedrockProvider) ParseResponse(body []byte) (string, error) {

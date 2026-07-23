@@ -269,10 +269,22 @@ func (p *LambdaProvider) SupportsStreaming() bool {
 	return true
 }
 
-// PrepareStreamRequest creates a request body for streaming API calls.
+// PrepareStreamRequest creates a request body for streaming API calls. Set the "stream_usage"
+// option to request the trailing usage chunk; it is off by default because compat gateways may
+// reject stream_options.
 func (p *LambdaProvider) PrepareStreamRequest(prompt string, options map[string]interface{}) ([]byte, error) {
 	options["stream"] = true
-	return p.PrepareRequest(prompt, options)
+	body, err := p.PrepareRequest(prompt, options)
+	if err != nil {
+		return nil, err
+	}
+	return prepareOpenAICompatStreamRequest(body, options, false)
+}
+
+// ParseStreamResponseRich reports text, tool-call fragments, finish reason, and token usage from
+// Lambda's OpenAI-shaped stream.
+func (p *LambdaProvider) ParseStreamResponseRich(chunk []byte) (types.StreamChunk, error) {
+	return parseOpenAICompatStreamChunk(chunk)
 }
 
 // ParseStreamResponse processes a single chunk from a streaming response.

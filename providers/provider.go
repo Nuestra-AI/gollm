@@ -219,22 +219,22 @@ func NewProviderRegistry(providerNames ...string) *ProviderRegistry {
 
 	// Register all known providers
 	knownProviders := map[string]ProviderConstructor{
-		"openai":        NewOpenAIProvider,
-		"anthropic":     NewAnthropicProvider,
-		"groq":          NewGroqProvider,
-		"ollama":        NewOllamaProvider,
-		"mistral":       NewMistralProvider,
-		"cohere":        NewCohereProvider,
-		"deepseek":      NewDeepSeekProvider,
-		"google-openai": NewGoogleProvider,
-		"azure-openai":  NewAzureOpenAIProvider,
-		"aliyun":        NewAliyunProvider,
-		"lmstudio":      NewLMStudioProvider,
-		"openrouter":    NewOpenRouterProvider,
-		"lambda":        NewLambdaProvider,
-		"bedrock":       NewBedrockProvider,
-		"vllm":              NewVLLMProvider,
-		"openai-responses":  NewOpenAIResponsesProvider,
+		"openai":           NewOpenAIProvider,
+		"anthropic":        NewAnthropicProvider,
+		"groq":             NewGroqProvider,
+		"ollama":           NewOllamaProvider,
+		"mistral":          NewMistralProvider,
+		"cohere":           NewCohereProvider,
+		"deepseek":         NewDeepSeekProvider,
+		"google-openai":    NewGoogleProvider,
+		"azure-openai":     NewAzureOpenAIProvider,
+		"aliyun":           NewAliyunProvider,
+		"lmstudio":         NewLMStudioProvider,
+		"openrouter":       NewOpenRouterProvider,
+		"lambda":           NewLambdaProvider,
+		"bedrock":          NewBedrockProvider,
+		"vllm":             NewVLLMProvider,
+		"openai-responses": NewOpenAIResponsesProvider,
 	}
 
 	// Standard provider configurations

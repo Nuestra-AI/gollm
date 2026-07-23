@@ -458,10 +458,21 @@ func (p *OpenAIResponsesProvider) parseResponseInternal(body []byte) (string, *t
 			} `json:"action,omitempty"`
 		} `json:"output"`
 		Usage struct {
-			InputTokens  int `json:"input_tokens"`
-			OutputTokens int `json:"output_tokens"`
-			TotalTokens  int `json:"total_tokens"`
+			InputTokens        int `json:"input_tokens"`
+			OutputTokens       int `json:"output_tokens"`
+			TotalTokens        int `json:"total_tokens"`
+			InputTokensDetails struct {
+				CachedTokens     int `json:"cached_tokens"`
+				CacheWriteTokens int `json:"cache_write_tokens"`
+				AudioTokens      int `json:"audio_tokens"`
+			} `json:"input_tokens_details"`
+			OutputTokensDetails struct {
+				ReasoningTokens int `json:"reasoning_tokens"`
+				AudioTokens     int `json:"audio_tokens"`
+			} `json:"output_tokens_details"`
 		} `json:"usage"`
+		// The tier the request was served on, which scales the price of every count above.
+		ServiceTier string `json:"service_tier"`
 	}
 
 	if err := json.Unmarshal(body, &response); err != nil {
@@ -475,7 +486,15 @@ func (p *OpenAIResponsesProvider) parseResponseInternal(body []byte) (string, *t
 			PromptTokens:     response.Usage.InputTokens,
 			CompletionTokens: response.Usage.OutputTokens,
 			TotalTokens:      response.Usage.TotalTokens,
+			// Reasoning models spend most of their output budget here; without this
+			// split the cost of a reasoning call is indistinguishable from a chat one.
+			CachedPromptTokens:     response.Usage.InputTokensDetails.CachedTokens,
+			ReasoningTokens:        response.Usage.OutputTokensDetails.ReasoningTokens,
+			CacheWritePromptTokens: response.Usage.InputTokensDetails.CacheWriteTokens,
+			AudioPromptTokens:      response.Usage.InputTokensDetails.AudioTokens,
+			AudioCompletionTokens:  response.Usage.OutputTokensDetails.AudioTokens,
 		},
+		ServiceTier: response.ServiceTier,
 	}
 
 	// Collect text, function calls, and web search data
@@ -809,13 +828,25 @@ func (p *OpenAIResponsesProvider) ParseStreamResponseRich(chunk []byte) (types.S
 		} `json:"item"`
 		Response struct {
 			Status string `json:"status"`
-			Error  *struct {
+			// The completed event names the model that served the response.
+			Model string `json:"model"`
+			Error *struct {
 				Message string `json:"message"`
 			} `json:"error"`
-			Usage struct {
-				InputTokens  int `json:"input_tokens"`
-				OutputTokens int `json:"output_tokens"`
-				TotalTokens  int `json:"total_tokens"`
+			ServiceTier string `json:"service_tier"`
+			Usage       struct {
+				InputTokens        int `json:"input_tokens"`
+				OutputTokens       int `json:"output_tokens"`
+				TotalTokens        int `json:"total_tokens"`
+				InputTokensDetails struct {
+					CachedTokens     int `json:"cached_tokens"`
+					CacheWriteTokens int `json:"cache_write_tokens"`
+					AudioTokens      int `json:"audio_tokens"`
+				} `json:"input_tokens_details"`
+				OutputTokensDetails struct {
+					ReasoningTokens int `json:"reasoning_tokens"`
+					AudioTokens     int `json:"audio_tokens"`
+				} `json:"output_tokens_details"`
 			} `json:"usage"`
 		} `json:"response"`
 	}
@@ -858,10 +889,17 @@ func (p *OpenAIResponsesProvider) ParseStreamResponseRich(chunk []byte) (types.S
 		return types.StreamChunk{
 			Kind:         "finish",
 			FinishReason: event.Response.Status,
+			Model:        event.Response.Model,
+			ServiceTier:  event.Response.ServiceTier,
 			Usage: &types.TokenUsage{
-				PromptTokens:     u.InputTokens,
-				CompletionTokens: u.OutputTokens,
-				TotalTokens:      u.TotalTokens,
+				PromptTokens:           u.InputTokens,
+				CompletionTokens:       u.OutputTokens,
+				TotalTokens:            u.TotalTokens,
+				CachedPromptTokens:     u.InputTokensDetails.CachedTokens,
+				ReasoningTokens:        u.OutputTokensDetails.ReasoningTokens,
+				CacheWritePromptTokens: u.InputTokensDetails.CacheWriteTokens,
+				AudioPromptTokens:      u.InputTokensDetails.AudioTokens,
+				AudioCompletionTokens:  u.OutputTokensDetails.AudioTokens,
 			},
 		}, nil
 	case "response.failed":

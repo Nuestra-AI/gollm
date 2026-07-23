@@ -605,11 +605,11 @@ func (p *OpenAIProvider) ParseResponseWithUsage(body []byte) (string, *types.Res
 			} `json:"message"`
 			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
-		Usage struct {
-			PromptTokens     int `json:"prompt_tokens"`
-			CompletionTokens int `json:"completion_tokens"`
-			TotalTokens      int `json:"total_tokens"`
-		} `json:"usage"`
+		// Shared shape: carries the cached/cache-write, reasoning, prediction and audio
+		// breakdowns, each billed at a different rate than the headline count it sits in.
+		Usage openAICompatUsage `json:"usage"`
+		// The tier the request was actually served on, which scales every count above.
+		ServiceTier string `json:"service_tier"`
 		// Web search specific fields (from Responses API format)
 		Output []struct {
 			Type   string `json:"type"`
@@ -646,13 +646,10 @@ func (p *OpenAIProvider) ParseResponseWithUsage(body []byte) (string, *types.Res
 
 	// Extract response details including ID and usage information
 	details := &types.ResponseDetails{
-		ID:    response.ID,
-		Model: response.Model,
-		TokenUsage: types.TokenUsage{
-			PromptTokens:     response.Usage.PromptTokens,
-			CompletionTokens: response.Usage.CompletionTokens,
-			TotalTokens:      response.Usage.TotalTokens,
-		},
+		ID:          response.ID,
+		Model:       response.Model,
+		TokenUsage:  *response.Usage.normalize(),
+		ServiceTier: response.ServiceTier,
 	}
 
 	// Check for web search response format (Responses API with output array)
@@ -1046,87 +1043,7 @@ func (p *OpenAIProvider) ParseStreamResponse(chunk []byte) (string, error) {
 // does NOT end the stream on finish_reason — OpenAI sends a trailing usage chunk
 // (choices:[] + usage), then [DONE]. Inherited by Google/DeepSeek via embedding.
 func (p *OpenAIProvider) ParseStreamResponseRich(chunk []byte) (types.StreamChunk, error) {
-	trimmed := bytes.TrimSpace(chunk)
-	if len(trimmed) == 0 {
-		return types.StreamChunk{}, types.ErrStreamSkip
-	}
-	if bytes.Equal(trimmed, []byte("[DONE]")) {
-		return types.StreamChunk{}, io.EOF
-	}
-
-	var response struct {
-		Choices []struct {
-			Delta struct {
-				Role      string `json:"role"`
-				Content   string `json:"content"`
-				ToolCalls []struct {
-					Index    int    `json:"index"`
-					ID       string `json:"id"`
-					Type     string `json:"type"`
-					Function struct {
-						Name      string `json:"name"`
-						Arguments string `json:"arguments"`
-					} `json:"function"`
-				} `json:"tool_calls"`
-			} `json:"delta"`
-			FinishReason string `json:"finish_reason"`
-		} `json:"choices"`
-		Usage *struct {
-			PromptTokens     int `json:"prompt_tokens"`
-			CompletionTokens int `json:"completion_tokens"`
-			TotalTokens      int `json:"total_tokens"`
-		} `json:"usage"`
-	}
-	if err := json.Unmarshal(trimmed, &response); err != nil {
-		return types.StreamChunk{}, fmt.Errorf("malformed response: %w", err)
-	}
-
-	// Final usage-only chunk (choices empty, usage populated).
-	if len(response.Choices) == 0 {
-		if response.Usage != nil {
-			return types.StreamChunk{Kind: "usage", Usage: &types.TokenUsage{
-				PromptTokens:     response.Usage.PromptTokens,
-				CompletionTokens: response.Usage.CompletionTokens,
-				TotalTokens:      response.Usage.TotalTokens,
-			}}, nil
-		}
-		return types.StreamChunk{}, types.ErrStreamSkip
-	}
-
-	choice := response.Choices[0]
-	// Tool-call fragment: the opening delta carries id+name, later deltas carry
-	// partial-JSON argument pieces. OpenAI typically streams one tool_calls entry
-	// per chunk (each with its own index), but a chunk may carry several; the
-	// extras beyond the first are returned as ExtraToolCallDeltas.
-	if len(choice.Delta.ToolCalls) > 0 {
-		deltas := make([]*types.ToolCallDelta, len(choice.Delta.ToolCalls))
-		for i, tc := range choice.Delta.ToolCalls {
-			deltas[i] = &types.ToolCallDelta{
-				Index:        tc.Index,
-				ID:           tc.ID,
-				Name:         tc.Function.Name,
-				ArgsFragment: tc.Function.Arguments,
-			}
-		}
-		return types.StreamChunk{Kind: "tool_call_delta", ToolCallDelta: deltas[0], ExtraToolCallDeltas: deltas[1:]}, nil
-	}
-	if choice.FinishReason != "" {
-		// Some gateways co-locate usage on the finish chunk instead of a separate
-		// trailing chunk; capture it here so it isn't dropped.
-		finish := types.StreamChunk{Kind: "finish", FinishReason: choice.FinishReason}
-		if response.Usage != nil {
-			finish.Usage = &types.TokenUsage{
-				PromptTokens:     response.Usage.PromptTokens,
-				CompletionTokens: response.Usage.CompletionTokens,
-				TotalTokens:      response.Usage.TotalTokens,
-			}
-		}
-		return finish, nil
-	}
-	if choice.Delta.Content == "" {
-		return types.StreamChunk{}, types.ErrStreamSkip
-	}
-	return types.StreamChunk{Kind: "text", Text: choice.Delta.Content}, nil
+	return parseOpenAICompatStreamChunk(chunk)
 }
 
 // buildOpenAIMessages converts MemoryMessage objects to the OpenAI messages format,

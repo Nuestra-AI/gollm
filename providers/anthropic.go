@@ -649,9 +649,24 @@ func (p *AnthropicProvider) ParseResponseWithUsage(body []byte) (string, *types.
 			CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 			CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 			OutputTokens             int `json:"output_tokens"`
-			ServerToolUse            *struct {
+			// Cache writes split by lifetime: 5-minute entries bill at 1.25x input,
+			// 1-hour entries at 2x, so the aggregate above cannot price them.
+			CacheCreation *struct {
+				Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens"`
+				Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens"`
+			} `json:"cache_creation,omitempty"`
+			// Extended thinking output. Anthropic's name for what OpenAI calls
+			// reasoning tokens; billed at the output rate and included in OutputTokens.
+			OutputTokensDetails *struct {
+				ThinkingTokens int `json:"thinking_tokens"`
+			} `json:"output_tokens_details,omitempty"`
+			ServerToolUse *struct {
 				WebSearchRequests int `json:"web_search_requests"`
-			} `json:"server_tool_use,omitempty"` // For web search usage tracking
+				WebFetchRequests  int `json:"web_fetch_requests"`
+			} `json:"server_tool_use,omitempty"` // For server-side tool usage tracking
+			// Batch is roughly half rate and priority a premium, so the tier scales
+			// every count above.
+			ServiceTier string `json:"service_tier"`
 		} `json:"usage"`
 	}
 
@@ -672,22 +687,43 @@ func (p *AnthropicProvider) ParseResponseWithUsage(body []byte) (string, *types.
 		ID:    response.ID,
 		Model: response.Model,
 		TokenUsage: types.TokenUsage{
-			PromptTokens:             response.Usage.InputTokens,
-			CompletionTokens:         response.Usage.OutputTokens,
-			TotalTokens:              response.Usage.InputTokens + response.Usage.OutputTokens,
+			PromptTokens:     response.Usage.InputTokens,
+			CompletionTokens: response.Usage.OutputTokens,
+			// Total is computed below, once the cache counts are in place: Anthropic reports
+			// no total of its own and bills cache reads and writes on top of InputTokens.
 			CacheCreationInputTokens: response.Usage.CacheCreationInputTokens,
 			CacheReadInputTokens:     response.Usage.CacheReadInputTokens,
 		},
+		ServiceTier: response.Usage.ServiceTier,
 	}
+	if d := response.Usage.CacheCreation; d != nil {
+		details.TokenUsage.CacheCreation5mInputTokens = d.Ephemeral5mInputTokens
+		details.TokenUsage.CacheCreation1hInputTokens = d.Ephemeral1hInputTokens
+		// Older responses carry only the aggregate; newer ones carry only the split.
+		// Derive whichever is missing so both are always available to price against.
+		if details.TokenUsage.CacheCreationInputTokens == 0 {
+			details.TokenUsage.CacheCreationInputTokens = d.Ephemeral5mInputTokens + d.Ephemeral1hInputTokens
+		}
+	}
+	if d := response.Usage.OutputTokensDetails; d != nil {
+		details.TokenUsage.ReasoningTokens = d.ThinkingTokens
+	}
+	details.TokenUsage.TotalTokens = details.TokenUsage.ComputedTotal()
 
 	// Initialize metadata for web search data
 	if details.Metadata == nil {
 		details.Metadata = make(map[string]interface{})
 	}
 
-	// Add web search usage if present
-	if response.Usage.ServerToolUse != nil && response.Usage.ServerToolUse.WebSearchRequests > 0 {
-		details.Metadata["web_search_requests"] = response.Usage.ServerToolUse.WebSearchRequests
+	// Add server-side tool usage if present. These are billed per request, separately
+	// from tokens, so they have to be recorded to cost a web-search turn correctly.
+	if stu := response.Usage.ServerToolUse; stu != nil {
+		if stu.WebSearchRequests > 0 {
+			details.Metadata["web_search_requests"] = stu.WebSearchRequests
+		}
+		if stu.WebFetchRequests > 0 {
+			details.Metadata["web_fetch_requests"] = stu.WebFetchRequests
+		}
 	}
 
 	p.logger.Debug("Number of content blocks: %d", len(response.Content))
@@ -967,6 +1003,49 @@ func (p *AnthropicProvider) ParseStreamResponse(chunk []byte) (string, error) {
 // tokens, and the final message_delta carries output tokens plus stop_reason —
 // so a consumer must accumulate usage across chunks.
 func (p *AnthropicProvider) ParseStreamResponseRich(chunk []byte) (types.StreamChunk, error) {
+	return parseAnthropicStreamChunk(chunk)
+}
+
+// anthropicStreamUsage is the usage shape Anthropic sends on both message_start (input side)
+// and message_delta (output side). One type covers both because unknown keys decode to zero.
+type anthropicStreamUsage struct {
+	InputTokens              int `json:"input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+	CacheCreation            *struct {
+		Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens"`
+		Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens"`
+	} `json:"cache_creation,omitempty"`
+	OutputTokensDetails *struct {
+		ThinkingTokens int `json:"thinking_tokens"`
+	} `json:"output_tokens_details,omitempty"`
+	ServiceTier string `json:"service_tier"`
+}
+
+func (u anthropicStreamUsage) normalize() types.TokenUsage {
+	usage := types.TokenUsage{
+		PromptTokens:             u.InputTokens,
+		CompletionTokens:         u.OutputTokens,
+		CacheCreationInputTokens: u.CacheCreationInputTokens,
+		CacheReadInputTokens:     u.CacheReadInputTokens,
+	}
+	if d := u.CacheCreation; d != nil {
+		usage.CacheCreation5mInputTokens = d.Ephemeral5mInputTokens
+		usage.CacheCreation1hInputTokens = d.Ephemeral1hInputTokens
+		if usage.CacheCreationInputTokens == 0 {
+			usage.CacheCreationInputTokens = d.Ephemeral5mInputTokens + d.Ephemeral1hInputTokens
+		}
+	}
+	if d := u.OutputTokensDetails; d != nil {
+		usage.ReasoningTokens = d.ThinkingTokens
+	}
+	return usage
+}
+
+// parseAnthropicStreamChunk is the Anthropic-format stream parser, shared with the generic
+// provider so Anthropic-compatible gateways report usage the same way the first-party client does.
+func parseAnthropicStreamChunk(chunk []byte) (types.StreamChunk, error) {
 	trimmed := bytes.TrimSpace(chunk)
 	if len(trimmed) == 0 {
 		return types.StreamChunk{}, types.ErrStreamSkip
@@ -979,12 +1058,10 @@ func (p *AnthropicProvider) ParseStreamResponseRich(chunk []byte) (types.StreamC
 		Type    string `json:"type"`
 		Index   int    `json:"index"`
 		Message struct {
-			Usage struct {
-				InputTokens              int `json:"input_tokens"`
-				OutputTokens             int `json:"output_tokens"`
-				CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
-				CacheReadInputTokens     int `json:"cache_read_input_tokens"`
-			} `json:"usage"`
+			// message_start names the model that actually served the stream, which a
+			// "-latest" alias resolves to something more specific than what was requested.
+			Model string               `json:"model"`
+			Usage anthropicStreamUsage `json:"usage"`
 		} `json:"message"`
 		ContentBlock struct {
 			Type string `json:"type"`
@@ -997,9 +1074,7 @@ func (p *AnthropicProvider) ParseStreamResponseRich(chunk []byte) (types.StreamC
 			PartialJSON string `json:"partial_json"`
 			StopReason  string `json:"stop_reason"`
 		} `json:"delta"`
-		Usage struct {
-			OutputTokens int `json:"output_tokens"`
-		} `json:"usage"`
+		Usage anthropicStreamUsage `json:"usage"`
 	}
 	if err := json.Unmarshal(trimmed, &event); err != nil {
 		return types.StreamChunk{}, fmt.Errorf("malformed event: %w", err)
@@ -1007,13 +1082,13 @@ func (p *AnthropicProvider) ParseStreamResponseRich(chunk []byte) (types.StreamC
 
 	switch event.Type {
 	case "message_start":
-		u := event.Message.Usage
-		return types.StreamChunk{Kind: "usage", Usage: &types.TokenUsage{
-			PromptTokens:             u.InputTokens,
-			CompletionTokens:         u.OutputTokens,
-			CacheCreationInputTokens: u.CacheCreationInputTokens,
-			CacheReadInputTokens:     u.CacheReadInputTokens,
-		}}, nil
+		u := event.Message.Usage.normalize()
+		return types.StreamChunk{
+			Kind:        "usage",
+			Model:       event.Message.Model,
+			ServiceTier: event.Message.Usage.ServiceTier,
+			Usage:       &u,
+		}, nil
 	case "content_block_start":
 		// A tool_use block opens with its id+name; arguments stream in later as
 		// input_json_delta fragments on content_block_delta events. The block's
@@ -1038,11 +1113,14 @@ func (p *AnthropicProvider) ParseStreamResponseRich(chunk []byte) (types.StreamC
 		}
 		return types.StreamChunk{}, types.ErrStreamSkip
 	case "message_delta":
-		// Final event: stop reason + cumulative output tokens.
+		// Final event: stop reason, cumulative output tokens, and — when extended
+		// thinking ran — the share of those output tokens spent on it.
+		u := event.Usage.normalize()
 		return types.StreamChunk{
 			Kind:         "finish",
 			FinishReason: event.Delta.StopReason,
-			Usage:        &types.TokenUsage{CompletionTokens: event.Usage.OutputTokens},
+			ServiceTier:  event.Usage.ServiceTier,
+			Usage:        &u,
 		}, nil
 	case "message_stop":
 		return types.StreamChunk{}, io.EOF

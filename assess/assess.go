@@ -14,6 +14,7 @@ import (
 	"github.com/teilomillet/gollm"
 	"github.com/teilomillet/gollm/config"
 	"github.com/teilomillet/gollm/llm"
+	"github.com/teilomillet/gollm/types"
 	"golang.org/x/time/rate"
 )
 
@@ -80,6 +81,10 @@ type TestRunner struct {
 	batchCfg     *BatchTestConfig
 	batchMetrics *BatchMetrics
 	mu           sync.Mutex
+
+	// usageObserver, when set, is installed on every per-provider client the runner builds, so a
+	// suite run against real providers can account for what it spent.
+	usageObserver types.UsageObserver
 }
 
 // TestMetrics tracks test execution metrics
@@ -148,6 +153,14 @@ func (tr *TestRunner) WithProviders(providers map[string]string) *TestRunner {
 
 func (tr *TestRunner) WithConfig(cfg *config.Config) *TestRunner {
 	tr.config = cfg
+	return tr
+}
+
+// WithUsageObserver records token usage for every call the suite makes. The runner builds its own
+// client per provider, so an observer attached to a client elsewhere never sees this traffic — and
+// a suite run against real providers is billed like any other workload.
+func (tr *TestRunner) WithUsageObserver(observer types.UsageObserver) *TestRunner {
+	tr.usageObserver = observer
 	return tr
 }
 
@@ -514,6 +527,11 @@ func (tr *TestRunner) setupClient(provider TestProvider) (llm.LLM, error) {
 	// Add any provider-specific headers
 	if provider.Headers != nil {
 		opts = append(opts, gollm.SetExtraHeaders(provider.Headers))
+	}
+
+	// Carry the suite's usage recorder into the client this runner owns.
+	if tr.usageObserver != nil {
+		opts = append(opts, gollm.WithUsageObserver(tr.usageObserver))
 	}
 
 	// Create LLM client

@@ -294,6 +294,14 @@ func (l *LLMWithMemory) SetOption(key string, value interface{}) {
 	l.LLM.SetOption(key, value)
 }
 
+// SetUsageObserver delegates to the wrapped LLM so usage from memory-backed generation is observed
+// too, reporting whether the observer was installed. The wrapped value is an LLM interface, which
+// deliberately does not require the capability, so this is a no-op returning false when the
+// underlying implementation doesn't support it.
+func (l *LLMWithMemory) SetUsageObserver(observer UsageObserver) bool {
+	return AttachUsageObserver(l.LLM, observer)
+}
+
 // SupportsStreaming checks if the provider supports streaming responses.
 func (l *LLMWithMemory) SupportsStreaming() bool {
 	return l.LLM.SupportsStreaming()
