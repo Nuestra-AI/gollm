@@ -58,7 +58,7 @@ func TestAnthropicDerivesCacheCreationAggregate(t *testing.T) {
 		t.Fatalf("ParseResponseWithUsage: %v", err)
 	}
 	if got := details.TokenUsage.CacheCreationInputTokens; got != 140 {
-		t.Errorf("cache creation aggregate = %d, want 140 (20+40 derived from the split)", got)
+		t.Errorf("cache creation aggregate = %d, want 140 (100+40 derived from the split)", got)
 	}
 	if got := details.TokenUsage.TotalTokens; got != 147 {
 		t.Errorf("total = %d, want 147 — derived cache writes must reach the total", got)

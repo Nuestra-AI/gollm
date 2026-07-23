@@ -177,11 +177,15 @@ type TokenUsage struct {
 // Add returns the element-wise sum of two usage records. It is the correct way
 // to accumulate the cost of a multi-round-trip operation (retries, tool loops,
 // mixture-of-agents), where each round-trip is billed independently.
+//
+// TotalTokens sums each operand's ComputedTotal, not its raw field, so a mix of an
+// OpenAI-style total and a components-only Anthropic-style one (TotalTokens 0) stays
+// inclusive instead of dropping the latter's round-trip.
 func (u TokenUsage) Add(other TokenUsage) TokenUsage {
 	return TokenUsage{
 		PromptTokens:             u.PromptTokens + other.PromptTokens,
 		CompletionTokens:         u.CompletionTokens + other.CompletionTokens,
-		TotalTokens:              u.TotalTokens + other.TotalTokens,
+		TotalTokens:              u.ComputedTotal() + other.ComputedTotal(),
 		CacheCreationInputTokens: u.CacheCreationInputTokens + other.CacheCreationInputTokens,
 		CacheReadInputTokens:     u.CacheReadInputTokens + other.CacheReadInputTokens,
 		CachedPromptTokens:       u.CachedPromptTokens + other.CachedPromptTokens,
