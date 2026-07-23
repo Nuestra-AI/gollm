@@ -264,7 +264,17 @@ func (p *GenericProvider) PrepareStreamRequest(prompt string, options map[string
 	}
 	streamOptions["stream"] = true
 
-	return p.PrepareRequest(prompt, streamOptions)
+	body, err := p.PrepareRequest(prompt, streamOptions)
+	if err != nil {
+		return nil, err
+	}
+	// OpenAI-shaped backends only emit a usage chunk when asked, via the "stream_usage" option —
+	// off by default since this provider fronts arbitrary compat endpoints that may reject
+	// stream_options. The Anthropic shape always reports usage in its own events, so needs no flag.
+	if p.config.Type == TypeOpenAI {
+		return prepareOpenAICompatStreamRequest(body, streamOptions, false)
+	}
+	return body, nil
 }
 
 // ParseStreamResponse processes a single chunk from a streaming response.
@@ -276,6 +286,19 @@ func (p *GenericProvider) ParseStreamResponse(chunk []byte) (string, error) {
 		return p.parseAnthropicStreamResponse(chunk)
 	default:
 		return "", fmt.Errorf("streaming not implemented for provider type: %s", p.config.Type)
+	}
+}
+
+// ParseStreamResponseRich reports text, tool-call fragments, finish reason, and token usage, using
+// whichever wire format this generic provider is configured for.
+func (p *GenericProvider) ParseStreamResponseRich(chunk []byte) (types.StreamChunk, error) {
+	switch p.config.Type {
+	case TypeOpenAI:
+		return parseOpenAICompatStreamChunk(chunk)
+	case TypeAnthropic, TypeClaude:
+		return parseAnthropicStreamChunk(chunk)
+	default:
+		return types.StreamChunk{}, fmt.Errorf("streaming not implemented for provider type: %s", p.config.Type)
 	}
 }
 
@@ -379,11 +402,7 @@ func (p *GenericProvider) parseOpenAIResponseWithUsage(body []byte) (string, *ty
 			} `json:"message"`
 			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
-		Usage struct {
-			PromptTokens     int `json:"prompt_tokens"`
-			CompletionTokens int `json:"completion_tokens"`
-			TotalTokens      int `json:"total_tokens"`
-		} `json:"usage"`
+		Usage openAICompatUsage `json:"usage"`
 		Error struct {
 			Message string `json:"message"`
 		} `json:"error"`
@@ -402,13 +421,9 @@ func (p *GenericProvider) parseOpenAIResponseWithUsage(body []byte) (string, *ty
 	}
 
 	details := &types.ResponseDetails{
-		ID:    response.ID,
-		Model: response.Model,
-		TokenUsage: types.TokenUsage{
-			PromptTokens:     response.Usage.PromptTokens,
-			CompletionTokens: response.Usage.CompletionTokens,
-			TotalTokens:      response.Usage.TotalTokens,
-		},
+		ID:         response.ID,
+		Model:      response.Model,
+		TokenUsage: *response.Usage.normalize(),
 	}
 
 	// Check for function calling response
@@ -575,13 +590,15 @@ func (p *GenericProvider) parseAnthropicResponseWithUsage(body []byte) (string, 
 		ID:    response.ID,
 		Model: response.Model,
 		TokenUsage: types.TokenUsage{
-			PromptTokens:             response.Usage.InputTokens,
-			CompletionTokens:         response.Usage.OutputTokens,
-			TotalTokens:              response.Usage.InputTokens + response.Usage.OutputTokens,
+			PromptTokens:     response.Usage.InputTokens,
+			CompletionTokens: response.Usage.OutputTokens,
+			// Total is computed below; the Anthropic shape reports none and bills its cache
+			// counts on top of InputTokens.
 			CacheCreationInputTokens: response.Usage.CacheCreationInputTokens,
 			CacheReadInputTokens:     response.Usage.CacheReadInputTokens,
 		},
 	}
+	details.TokenUsage.TotalTokens = details.TokenUsage.ComputedTotal()
 
 	return response.Content[0].Text, details, nil
 }

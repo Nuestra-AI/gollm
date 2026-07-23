@@ -346,10 +346,22 @@ func (p *GroqProvider) SupportsStreaming() bool {
 	return true
 }
 
-// PrepareStreamRequest prepares a request body for streaming
+// PrepareStreamRequest prepares a request body for streaming. Set the "stream_usage" option to
+// request the trailing usage chunk; it is off by default because compat gateways in front of Groq
+// may reject stream_options.
 func (p *GroqProvider) PrepareStreamRequest(prompt string, options map[string]interface{}) ([]byte, error) {
 	options["stream"] = true
-	return p.PrepareRequest(prompt, options)
+	body, err := p.PrepareRequest(prompt, options)
+	if err != nil {
+		return nil, err
+	}
+	return prepareOpenAICompatStreamRequest(body, options, false)
+}
+
+// ParseStreamResponseRich reports text, tool-call fragments, finish reason, and token usage from
+// Groq's OpenAI-shaped stream.
+func (p *GroqProvider) ParseStreamResponseRich(chunk []byte) (types.StreamChunk, error) {
+	return parseOpenAICompatStreamChunk(chunk)
 }
 
 // ParseStreamResponse parses a single chunk from a streaming response

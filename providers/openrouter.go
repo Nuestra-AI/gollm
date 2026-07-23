@@ -532,11 +532,9 @@ func (p *OpenRouterProvider) ParseResponseWithUsage(body []byte) (string, *types
 			FinishReason       string `json:"finish_reason"`
 			NativeFinishReason string `json:"native_finish_reason"`
 		} `json:"choices"`
-		Usage struct {
-			PromptTokens     int `json:"prompt_tokens"`
-			CompletionTokens int `json:"completion_tokens"`
-			TotalTokens      int `json:"total_tokens"`
-		} `json:"usage"`
+		// Shared shape: OpenRouter passes through the upstream model's cached-input and
+		// reasoning-output breakdowns, which are billed differently from the totals.
+		Usage openAICompatUsage `json:"usage"`
 		Error struct {
 			Message string `json:"message"`
 		} `json:"error"`
@@ -565,13 +563,9 @@ func (p *OpenRouterProvider) ParseResponseWithUsage(body []byte) (string, *types
 		}
 
 		details := &types.ResponseDetails{
-			ID:    chatResp.ID,
-			Model: chatResp.Model,
-			TokenUsage: types.TokenUsage{
-				PromptTokens:     chatResp.Usage.PromptTokens,
-				CompletionTokens: chatResp.Usage.CompletionTokens,
-				TotalTokens:      chatResp.Usage.TotalTokens,
-			},
+			ID:         chatResp.ID,
+			Model:      chatResp.Model,
+			TokenUsage: *chatResp.Usage.normalize(),
 		}
 
 		message := chatResp.Choices[0].Message
@@ -604,11 +598,7 @@ func (p *OpenRouterProvider) ParseResponseWithUsage(body []byte) (string, *types
 		Choices []struct {
 			Text string `json:"text"`
 		} `json:"choices"`
-		Usage struct {
-			PromptTokens     int `json:"prompt_tokens"`
-			CompletionTokens int `json:"completion_tokens"`
-			TotalTokens      int `json:"total_tokens"`
-		} `json:"usage"`
+		Usage openAICompatUsage `json:"usage"`
 		Error struct {
 			Message string `json:"message"`
 		} `json:"error"`
@@ -653,13 +643,9 @@ func (p *OpenRouterProvider) ParseResponseWithUsage(body []byte) (string, *types
 	p.logger.Debug("Parsed text completion", "text", textResp.Choices[0].Text)
 
 	details := &types.ResponseDetails{
-		ID:    textResp.ID,
-		Model: textResp.Model,
-		TokenUsage: types.TokenUsage{
-			PromptTokens:     textResp.Usage.PromptTokens,
-			CompletionTokens: textResp.Usage.CompletionTokens,
-			TotalTokens:      textResp.Usage.TotalTokens,
-		},
+		ID:         textResp.ID,
+		Model:      textResp.Model,
+		TokenUsage: *textResp.Usage.normalize(),
 	}
 
 	// Return text completion
@@ -788,14 +774,14 @@ func (p *OpenRouterProvider) ParseStreamResponseRich(chunk []byte) (types.Stream
 			} `json:"delta"`
 			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
-		Usage *struct {
-			PromptTokens     int `json:"prompt_tokens"`
-			CompletionTokens int `json:"completion_tokens"`
-			TotalTokens      int `json:"total_tokens"`
-		} `json:"usage"`
+		Usage *openAICompatUsage `json:"usage"`
 		Error struct {
 			Message string `json:"message"`
 		} `json:"error"`
+		// OpenRouter routes a request to whichever upstream it picks, and reports that
+		// choice per chunk. It is frequently not the model the caller named, and it is
+		// priced differently, so usage has to be attributed to this rather than to config.
+		Model string `json:"model"`
 	}
 	if err := json.Unmarshal(trimmed, &resp); err != nil {
 		return types.StreamChunk{}, fmt.Errorf("malformed response: %w", err)
@@ -804,16 +790,7 @@ func (p *OpenRouterProvider) ParseStreamResponseRich(chunk []byte) (types.Stream
 		return types.StreamChunk{}, fmt.Errorf("OpenRouter API streaming error: %s", resp.Error.Message)
 	}
 
-	usage := func() *types.TokenUsage {
-		if resp.Usage == nil {
-			return nil
-		}
-		return &types.TokenUsage{
-			PromptTokens:     resp.Usage.PromptTokens,
-			CompletionTokens: resp.Usage.CompletionTokens,
-			TotalTokens:      resp.Usage.TotalTokens,
-		}
-	}
+	usage := resp.Usage.normalize
 
 	if len(resp.Choices) > 0 {
 		choice := resp.Choices[0]
@@ -829,21 +806,21 @@ func (p *OpenRouterProvider) ParseStreamResponseRich(chunk []byte) (types.Stream
 					ArgsFragment: tc.Function.Arguments,
 				}
 			}
-			return types.StreamChunk{Kind: "tool_call_delta", ToolCallDelta: deltas[0], ExtraToolCallDeltas: deltas[1:]}, nil
+			return types.StreamChunk{Kind: "tool_call_delta", ToolCallDelta: deltas[0], ExtraToolCallDeltas: deltas[1:], Model: resp.Model}, nil
 		}
 		if choice.Delta.Content != "" {
-			return types.StreamChunk{Kind: "text", Text: choice.Delta.Content}, nil
+			return types.StreamChunk{Kind: "text", Text: choice.Delta.Content, Model: resp.Model}, nil
 		}
 		// Finish reason does not end the stream — a usage chunk and [DONE] follow.
 		// Attach usage if this same chunk also carries it.
 		if choice.FinishReason != "" {
-			return types.StreamChunk{Kind: "finish", FinishReason: choice.FinishReason, Usage: usage()}, nil
+			return types.StreamChunk{Kind: "finish", FinishReason: choice.FinishReason, Usage: usage(), Model: resp.Model}, nil
 		}
 	}
 
 	// Trailing usage-only chunk (choices empty or delta carried nothing).
 	if u := usage(); u != nil {
-		return types.StreamChunk{Kind: "usage", Usage: u}, nil
+		return types.StreamChunk{Kind: "usage", Usage: u, Model: resp.Model}, nil
 	}
 
 	return types.StreamChunk{}, types.ErrStreamSkip

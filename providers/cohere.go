@@ -1,6 +1,7 @@
 package providers
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -315,9 +316,16 @@ func (p *CohereProvider) ParseResponseWithUsage(body []byte) (string, *types.Res
 				} `json:"function"`
 			} `json:"tool_calls"`
 		} `json:"message"`
+		// Cohere v2 nests the counts under usage.tokens (usage.billed_units carries the
+		// same numbers post-billing). The flat form is accepted as well so a v1-shaped
+		// or gateway-proxied response still reports usage instead of silently zeroing.
 		Usage struct {
 			InputTokens  int `json:"input_tokens"`
 			OutputTokens int `json:"output_tokens"`
+			Tokens       struct {
+				InputTokens  int `json:"input_tokens"`
+				OutputTokens int `json:"output_tokens"`
+			} `json:"tokens"`
 		} `json:"usage"`
 	}
 
@@ -329,13 +337,23 @@ func (p *CohereProvider) ParseResponseWithUsage(body []byte) (string, *types.Res
 		return "", nil, fmt.Errorf("empty response from API")
 	}
 
+	inputTokens := response.Usage.Tokens.InputTokens
+	if inputTokens == 0 {
+		inputTokens = response.Usage.InputTokens
+	}
+	outputTokens := response.Usage.Tokens.OutputTokens
+	if outputTokens == 0 {
+		outputTokens = response.Usage.OutputTokens
+	}
+
 	// Extract response details including ID and normalized usage structure
 	details := &types.ResponseDetails{
-		ID: response.ID,
+		ID:    response.ID,
+		Model: p.model,
 		TokenUsage: types.TokenUsage{
-			PromptTokens:     response.Usage.InputTokens,
-			CompletionTokens: response.Usage.OutputTokens,
-			TotalTokens:      response.Usage.InputTokens + response.Usage.OutputTokens,
+			PromptTokens:     inputTokens,
+			CompletionTokens: outputTokens,
+			TotalTokens:      inputTokens + outputTokens,
 		},
 	}
 
@@ -416,6 +434,68 @@ func (p *CohereProvider) ParseStreamResponse(chunk []byte) (string, error) {
 		return "", err
 	}
 	return response.Text, nil
+}
+
+// ParseStreamResponseRich adds the finish reason and token usage to the streamed text. Cohere v2
+// reports usage only on the terminal message-end event, so without this the entire cost of a
+// streamed Cohere generation goes unrecorded.
+func (p *CohereProvider) ParseStreamResponseRich(chunk []byte) (types.StreamChunk, error) {
+	trimmed := bytes.TrimSpace(chunk)
+	if len(trimmed) == 0 {
+		return types.StreamChunk{}, types.ErrStreamSkip
+	}
+
+	var event struct {
+		Type  string `json:"type"`
+		Delta struct {
+			Message struct {
+				Content struct {
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
+			Usage        struct {
+				Tokens struct {
+					InputTokens  int `json:"input_tokens"`
+					OutputTokens int `json:"output_tokens"`
+				} `json:"tokens"`
+			} `json:"usage"`
+		} `json:"delta"`
+		// v1-shaped chunks carry the text at the top level.
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(trimmed, &event); err != nil {
+		return types.StreamChunk{}, fmt.Errorf("malformed response: %w", err)
+	}
+
+	switch event.Type {
+	case "content-delta":
+		text := event.Delta.Message.Content.Text
+		if text == "" {
+			return types.StreamChunk{}, types.ErrStreamSkip
+		}
+		return types.StreamChunk{Kind: "text", Text: text}, nil
+	case "message-end":
+		u := event.Delta.Usage.Tokens
+		finish := types.StreamChunk{Kind: "finish", FinishReason: event.Delta.FinishReason}
+		if u.InputTokens > 0 || u.OutputTokens > 0 {
+			finish.Usage = &types.TokenUsage{
+				PromptTokens:     u.InputTokens,
+				CompletionTokens: u.OutputTokens,
+				TotalTokens:      u.InputTokens + u.OutputTokens,
+			}
+		}
+		return finish, nil
+	case "":
+		// Untyped chunk: fall back to the flat text form.
+		if event.Text == "" {
+			return types.StreamChunk{}, types.ErrStreamSkip
+		}
+		return types.StreamChunk{Kind: "text", Text: event.Text}, nil
+	default:
+		// message-start, content-start, content-end and friends carry no payload.
+		return types.StreamChunk{}, types.ErrStreamSkip
+	}
 }
 
 // PrepareRequestWithMessages creates a request using structured message objects.

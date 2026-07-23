@@ -202,25 +202,86 @@ func (p *OllamaProvider) ParseResponse(body []byte) (string, error) {
 	return fullResponse.String(), nil
 }
 
-// ParseResponseWithUsage extracts the generated text from the Ollama API response.
-// Ollama doesn't provide token usage or message IDs, so this returns nil for details.
+// ParseResponseWithUsage extracts the generated text and token usage from the Ollama API response.
+//
+// Ollama reports counts on the final ("done") object of its stream as prompt_eval_count and
+// eval_count rather than a usage object, so they are normalized here. It issues no message ID.
 //
 // Parameters:
 //   - body: Raw API response body
 //
 // Returns:
 //   - Generated text content
-//   - nil (Ollama doesn't provide response details)
+//   - Response details carrying the normalized token usage
 //   - Any error encountered during parsing
 func (p *OllamaProvider) ParseResponseWithUsage(body []byte) (string, *types.ResponseDetails, error) {
-	// Ollama doesn't provide token usage or message IDs, so we parse the response normally
-	text, err := p.ParseResponse(body)
-	if err != nil {
-		return "", nil, err
+	var fullResponse strings.Builder
+	details := &types.ResponseDetails{Model: p.model}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+
+	for decoder.More() {
+		var response struct {
+			Model    string `json:"model"`
+			Response string `json:"response"`
+			Done     bool   `json:"done"`
+			// Counts arrive only on the terminal object.
+			PromptEvalCount int `json:"prompt_eval_count"`
+			EvalCount       int `json:"eval_count"`
+		}
+		if err := decoder.Decode(&response); err != nil {
+			return "", nil, fmt.Errorf("error parsing Ollama response: %w", err)
+		}
+		fullResponse.WriteString(response.Response)
+		if response.Model != "" {
+			details.Model = response.Model
+		}
+		if response.PromptEvalCount > 0 {
+			details.TokenUsage.PromptTokens = response.PromptEvalCount
+		}
+		if response.EvalCount > 0 {
+			details.TokenUsage.CompletionTokens = response.EvalCount
+		}
+		if response.Done {
+			break
+		}
 	}
 
-	// Return nil for details since Ollama doesn't provide this information
-	return text, nil, nil
+	details.TokenUsage.TotalTokens = details.TokenUsage.PromptTokens + details.TokenUsage.CompletionTokens
+	return fullResponse.String(), details, nil
+}
+
+// ParseStreamResponseRich reports Ollama's per-chunk text plus the token counts carried on its
+// terminal object, so streamed generations are accounted for like non-streamed ones.
+func (p *OllamaProvider) ParseStreamResponseRich(chunk []byte) (types.StreamChunk, error) {
+	var response struct {
+		Model           string `json:"model"`
+		Response        string `json:"response"`
+		Done            bool   `json:"done"`
+		DoneReason      string `json:"done_reason"`
+		PromptEvalCount int    `json:"prompt_eval_count"`
+		EvalCount       int    `json:"eval_count"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(chunk), &response); err != nil {
+		return types.StreamChunk{}, fmt.Errorf("malformed response: %w", err)
+	}
+
+	if response.Done {
+		// Terminal object: carries the finish reason and the only usage Ollama reports.
+		finish := types.StreamChunk{Kind: "finish", Text: response.Response, FinishReason: response.DoneReason, Model: response.Model}
+		if response.PromptEvalCount > 0 || response.EvalCount > 0 {
+			finish.Usage = &types.TokenUsage{
+				PromptTokens:     response.PromptEvalCount,
+				CompletionTokens: response.EvalCount,
+				TotalTokens:      response.PromptEvalCount + response.EvalCount,
+			}
+		}
+		return finish, nil
+	}
+
+	if response.Response == "" {
+		return types.StreamChunk{}, types.ErrStreamSkip
+	}
+	return types.StreamChunk{Kind: "text", Text: response.Response, Model: response.Model}, nil
 }
 
 // HandleFunctionCalls processes function calling capabilities.
