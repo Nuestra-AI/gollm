@@ -107,6 +107,14 @@ var (
 	SetLogLevel     = config.SetLogLevel     // Sets logging verbosity
 	SetExtraHeaders = config.SetExtraHeaders // Sets additional HTTP headers
 
+	// WithUsageObserver registers a token-usage recorder on every client built from the
+	// config, including the ones MOA and the assess harness construct internally.
+	WithUsageObserver = config.WithUsageObserver
+
+	// SetHTTPClient supplies the HTTP client for provider requests, the seam for custom
+	// RoundTrippers (transport-level usage capture, logging, proxies, TLS).
+	SetHTTPClient = config.SetHTTPClient
+
 	// Feature toggles
 	SetEnableCaching = config.SetEnableCaching // Enables/disables response caching
 	SetMemory        = config.SetMemory        // Configures conversation memory

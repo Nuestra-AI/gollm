@@ -28,6 +28,43 @@ func NewToolError(toolCallID, errorMessage string) ToolResult {
 	return types.NewToolError(toolCallID, errorMessage)
 }
 
+// Usage accounting. An observer registered with LLM.SetUsageObserver is fired once per billed
+// provider round-trip — successes, schema rejections, unparseable responses, retried attempts, and
+// completed or abandoned streams alike — which is the only way to account for tokens spent on
+// anything but the final successful attempt. These aliases spare callers an extra import.
+type (
+	// UsageObserver receives one UsageEvent per billed round-trip.
+	UsageObserver = llm.UsageObserver
+	// UsageEvent describes a single billed round-trip; see llm.UsageEvent.
+	UsageEvent = llm.UsageEvent
+	// UsageOutcome says what became of the response a round-trip paid for.
+	UsageOutcome = llm.UsageOutcome
+	// TokenUsage is the normalized token accounting shared by all providers.
+	TokenUsage = types.TokenUsage
+)
+
+// AttachUsageObserver installs a usage observer on an already-built client, reporting whether the
+// client supports one. Prefer WithUsageObserver at construction — it needs no check and reaches the
+// clients MOA and the assess harness build internally.
+func AttachUsageObserver(client interface{}, observer UsageObserver) bool {
+	return llm.AttachUsageObserver(client, observer)
+}
+
+// StreamUsage returns a stream's accumulated token usage when the stream can report it, final once
+// the stream has ended.
+func StreamUsage(stream llm.TokenStream) (TokenUsage, bool) {
+	return llm.StreamUsage(stream)
+}
+
+// Usage outcomes reported to a UsageObserver.
+const (
+	UsageOutcomeSuccess       = llm.UsageOutcomeSuccess
+	UsageOutcomeSchemaFail    = llm.UsageOutcomeSchemaFail
+	UsageOutcomeParseFail     = llm.UsageOutcomeParseFail
+	UsageOutcomeStream        = llm.UsageOutcomeStream
+	UsageOutcomeStreamAborted = llm.UsageOutcomeStreamAborted
+)
+
 // LLM is the interface that wraps the basic LLM operations.
 // It extends the base llm.LLM interface with additional functionality specific to gollm,
 // providing a comprehensive set of methods for LLM interaction, configuration, and management.
@@ -190,6 +227,18 @@ func (l *llmImpl) Debug(msg string, keysAndValues ...interface{}) {
 // GetLogLevel returns the current log level of the LLM.
 func (l *llmImpl) GetLogLevel() LogLevel {
 	return LogLevel(l.config.LogLevel)
+}
+
+// SetUsageObserver installs a token-usage recorder on the underlying client, reporting whether it
+// was actually installed. It is a method on the concrete type rather than on the LLM interface, so
+// that implementations of that interface downstream are not forced to grow a method; llmImpl embeds
+// an LLM interface value, which would otherwise hide the capability from AttachUsageObserver.
+//
+// The result is forwarded from the embedded value rather than assumed: an embedded LLM that does not
+// support observation must not be reported as observed, or a caller that skips its own accounting on
+// the strength of this answer records nothing at all.
+func (l *llmImpl) SetUsageObserver(observer UsageObserver) bool {
+	return llm.AttachUsageObserver(l.LLM, observer)
 }
 
 // SetOption sets an option for the LLM with the given key and value.

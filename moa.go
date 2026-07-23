@@ -86,10 +86,23 @@ func NewMOA(moaConfig MOAConfig, aggregatorOpts ...ConfigOption) (*MOA, error) {
 		Layers: make([]MOALayer, len(moaConfig.Models)),
 	}
 
+	// Resolve the aggregator config first so its usage observer can be shared with the layer
+	// models below. A single MOA.Generate is (models x iterations)+1 billed calls, so accounting
+	// is only useful if one observer covers the whole ensemble rather than the aggregator alone.
+	aggregatorConfig := &config.Config{}
+	for _, opt := range aggregatorOpts {
+		opt(aggregatorConfig)
+	}
+
 	// Initialize each layer with its corresponding model
 	for i, modelOpt := range moaConfig.Models {
 		cfg := &config.Config{}
 		modelOpt(cfg)
+		// A model that sets its own observer keeps it; otherwise it inherits the aggregator's, so
+		// WithUsageObserver need only be passed once.
+		if cfg.UsageObserver == nil {
+			cfg.UsageObserver = aggregatorConfig.UsageObserver
+		}
 		llmInstance, err := llm.NewLLM(cfg, logger, registry)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create LLM for model %d: %w", i, err)
@@ -100,10 +113,6 @@ func NewMOA(moaConfig MOAConfig, aggregatorOpts ...ConfigOption) (*MOA, error) {
 	}
 
 	// Create the aggregator LLM
-	aggregatorConfig := &config.Config{}
-	for _, opt := range aggregatorOpts {
-		opt(aggregatorConfig)
-	}
 	aggregator, err := llm.NewLLM(aggregatorConfig, logger, registry)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create aggregator LLM: %w", err)

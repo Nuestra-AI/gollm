@@ -4,11 +4,13 @@
 package config
 
 import (
+	"net/http"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/caarlos0/env/v11"
+	"github.com/teilomillet/gollm/types"
 	"github.com/teilomillet/gollm/utils"
 )
 
@@ -81,6 +83,19 @@ type Config struct {
 	EnableStreaming       bool `env:"LLM_ENABLE_STREAMING" envDefault:"false"`
 	MemoryOption          *MemoryOption
 	CustomValidator       func(interface{}) error // Custom validation function to override default validation
+
+	// UsageObserver, when set, is installed on every LLM client built from this config and fired
+	// once per billed provider round-trip. Attaching it here rather than to an already-built client
+	// is what lets the accounting reach clients the caller never constructs directly — the per-model
+	// and aggregator clients inside MOA, and the per-case clients inside the assess harness.
+	UsageObserver types.UsageObserver
+
+	// HTTPClient overrides the client used for provider requests. Supplying one is the seam for
+	// anything that belongs at the transport layer rather than the provider layer: a RoundTripper
+	// that records usage from response headers (which is where Bedrock reports token counts, out of
+	// reach of body parsing), request logging, proxies, or custom TLS. When nil a client is built
+	// with the configured Timeout; when set, its own Timeout is respected as-is.
+	HTTPClient *http.Client
 }
 
 // LoadConfig creates a new Config instance, loading values from environment
@@ -260,6 +275,34 @@ func SetLogLevel(level utils.LogLevel) ConfigOption {
 func SetLogger(logger utils.Logger) ConfigOption {
 	return func(c *Config) {
 		c.Logger = logger
+	}
+}
+
+// WithUsageObserver registers a hook fired once per billed provider round-trip on every client
+// built from this config — successes, schema rejections, unparseable responses, each retried
+// attempt, and completed or abandoned streams alike.
+//
+// Prefer this over LLM.SetUsageObserver when the clients are not yours to hold: NewMOA builds one
+// client per ensemble model plus an aggregator, and the assess harness builds one per test case.
+// Configured here, the observer travels into all of them, so a single recorder accounts for the
+// whole operation.
+//
+// The observer runs synchronously on the generation path and may be shared by clients running
+// concurrently, so it must be cheap and safe for concurrent use. Pass nil to clear it.
+func WithUsageObserver(observer types.UsageObserver) ConfigOption {
+	return func(c *Config) {
+		c.UsageObserver = observer
+	}
+}
+
+// SetHTTPClient overrides the HTTP client used for provider requests, letting a caller install a
+// custom RoundTripper. That is the seam for transport-level concerns the provider layer cannot
+// reach: usage reported in response headers (Bedrock's token counts arrive that way), request
+// logging, proxies, or custom TLS. The supplied client's Timeout is used as-is, so set one — the
+// config's Timeout is only applied to the default client.
+func SetHTTPClient(client *http.Client) ConfigOption {
+	return func(c *Config) {
+		c.HTTPClient = client
 	}
 }
 
