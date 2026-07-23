@@ -73,14 +73,29 @@ func (p *OpenAIResponsesProvider) SetOption(key string, value interface{}) {
 		key = "max_output_tokens"
 	}
 
-	if key == "reasoning_effort" && !modelNeedsReasoningEffort(p.model) {
-		delete(p.options, "reasoning_effort")
-		return
+	if key == "reasoning_effort" {
+		str, ok := optionString(value)
+		if !ok {
+			delete(p.options, "reasoning_effort")
+			return
+		}
+		normalized, ok := normalizeOpenAIReasoningEffort(p.model, str)
+		if !ok {
+			delete(p.options, "reasoning_effort")
+			return
+		}
+		value = normalized
 	}
 
-	if key == "temperature" && modelNeedsNoTemperature(p.model) {
-		delete(p.options, "temperature")
-		return
+	// Reasoning models reject the whole sampling family, not temperature alone; any one of
+	// them fails the request, so none is stored.
+	if isOpenAIFamilyModel(p.model) && modelNeedsNoTemperature(p.model) {
+		for _, unsupported := range reasoningUnsupportedParams {
+			if key == unsupported {
+				delete(p.options, key)
+				return
+			}
+		}
 	}
 
 	p.options[key] = value
@@ -240,6 +255,8 @@ func (p *OpenAIResponsesProvider) PrepareRequest(prompt string, options map[stri
 	for k, v := range merged {
 		request[k] = v
 	}
+	applyResponsesVerbosity(request)
+	applyResponsesReasoning(request)
 
 	return json.Marshal(request)
 }
@@ -279,6 +296,8 @@ func (p *OpenAIResponsesProvider) PrepareRequestWithSchema(prompt string, option
 	for k, v := range merged {
 		request[k] = v
 	}
+	applyResponsesVerbosity(request)
+	applyResponsesReasoning(request)
 
 	return json.Marshal(request)
 }
@@ -305,6 +324,8 @@ func (p *OpenAIResponsesProvider) PrepareRequestWithMessages(messages []types.Me
 	for k, v := range merged {
 		request[k] = v
 	}
+	applyResponsesVerbosity(request)
+	applyResponsesReasoning(request)
 
 	return json.Marshal(request)
 }
@@ -346,6 +367,8 @@ func (p *OpenAIResponsesProvider) PrepareRequestWithMessagesAndSchema(messages [
 	for k, v := range merged {
 		request[k] = v
 	}
+	applyResponsesVerbosity(request)
+	applyResponsesReasoning(request)
 
 	return json.Marshal(request)
 }
@@ -742,6 +765,8 @@ func (p *OpenAIResponsesProvider) PrepareStreamRequest(prompt string, options ma
 	for k, v := range merged {
 		request[k] = v
 	}
+	applyResponsesVerbosity(request)
+	applyResponsesReasoning(request)
 
 	return json.Marshal(request)
 }

@@ -666,9 +666,16 @@ func TestModelNeedsNoTemperature(t *testing.T) {
 }
 
 func TestModelNeedsNoToolChoice(t *testing.T) {
-	// O-series should reject tool_choice
-	for _, model := range []string{"o1", "o3", "o3-mini", "o4-mini"} {
+	// Only the first-generation o1 previews lack tool support entirely.
+	for _, model := range []string{"o1-preview", "o1-mini"} {
 		assert.True(t, modelNeedsNoToolChoice(model), "expected %q to need no tool_choice", model)
+	}
+	// Every current reasoning model supports tools and tool_choice — the published support
+	// matrix marks Functions/Tools available across the whole o-series and GPT-5 tables, and
+	// GPT-5 extends tool_choice further. These previously asserted the opposite, which meant
+	// tool_choice:"required" was stripped and silently degraded to auto.
+	for _, model := range []string{"o1", "o3", "o3-mini", "o4-mini", "codex-mini", "gpt-5", "gpt-5.4-pro"} {
+		assert.False(t, modelNeedsNoToolChoice(model), "expected %q to support tool_choice", model)
 	}
 	// GPT-4o, GPT-4.1 should support tool_choice
 	for _, model := range []string{"gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4"} {

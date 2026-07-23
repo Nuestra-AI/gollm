@@ -66,33 +66,26 @@ func (p *OpenAIProvider) SetLogger(logger utils.Logger) {
 	p.logger = logger
 }
 
-// needsMaxCompletionTokens checks if the model requires max_completion_tokens instead of max_tokens
+// needsMaxCompletionTokens checks if the model requires max_completion_tokens instead of max_tokens.
+//
+// It delegates to the shared predicate rather than matching substrings. The substring form this
+// replaced classified by "o" prefix and "-o"/"-5" anywhere in the id, which is true of model names
+// that have nothing to do with the o-series or GPT-5 — and the two predicates disagreeing about the
+// same model is how a request ends up with both max_tokens and max_completion_tokens, or neither.
 func (p *OpenAIProvider) needsMaxCompletionTokens() bool {
-	// Check for models that start with "o"
-	if strings.HasPrefix(p.model, "o") {
-		return true
-	}
-
-	// Check for gpt-4o and similar models
-	if strings.Contains(p.model, "4o") || strings.Contains(p.model, "-o") || strings.Contains(p.model, "-5") {
-		return true
-	}
-
-	return false
+	return modelNeedsMaxCompletionTokens(p.model)
 }
 
+// needsReasoningEffort reports whether the model accepts reasoning_effort: the o-series (except
+// o1-mini), codex-mini, and the GPT-5 family do; GPT-4o/4.1 and the non-reasoning gpt-5-chat
+// variants do not. See modelNeedsReasoningEffort for the authoritative rule.
 func (p *OpenAIProvider) needsReasoningEffort() bool {
-	// Check for models that start with "o"
-	if strings.HasPrefix(p.model, "o") {
-		return true
-	}
+	return modelNeedsReasoningEffort(p.model)
+}
 
-	// Check for gpt-5
-	if strings.Contains(p.model, "-5") {
-		return true
-	}
-
-	return false
+// needsVerbosity reports whether the model accepts the verbosity parameter (GPT-5 only).
+func (p *OpenAIProvider) needsVerbosity() bool {
+	return modelSupportsVerbosity(p.model)
 }
 
 func (p *OpenAIProvider) needsNoTemperature() bool {
@@ -111,12 +104,29 @@ func (p *OpenAIProvider) needsNoToolChoice() bool {
 }
 
 // modelNeedsNoToolChoice checks if a given model doesn't support tool_choice.
-// O-series reasoning models and GPT-5 don't support tool_choice.
+//
+// Only the first-generation o1 preview models lack it. Every current reasoning model — o3,
+// o3-mini, o4-mini, codex-mini and the whole GPT-5 family — supports tools and tool_choice,
+// and GPT-5 extends it further (several tools may be named under one tool_choice). Treating
+// them as unsupported silently downgraded tool_choice:"required" to auto, which produces a
+// plausible response instead of an error and so goes unnoticed.
+//
+// What the o-series genuinely lacks is parallel tool calls; see modelNeedsNoParallelToolCalls.
 func modelNeedsNoToolChoice(model string) bool {
-	if isOSeriesModel(model) {
+	return strings.HasPrefix(model, "o1-preview") || strings.HasPrefix(model, "o1-mini")
+}
+
+// modelNeedsNoParallelToolCalls reports whether parallel_tool_calls must be withheld. No
+// o-series model and not codex-mini support it. GPT-5 does, except when reasoning_effort is
+// "minimal", so the effort in play is part of the question.
+func modelNeedsNoParallelToolCalls(model string, opts map[string]interface{}) bool {
+	if isOSeriesModel(model) || isCodexMiniModel(model) {
 		return true
 	}
-	return isGPT5Model(model)
+	if effort, ok := optionString(opts["reasoning_effort"]); ok && effort == string(types.ReasoningEffortMinimal) {
+		return isGPT5Model(model)
+	}
+	return false
 }
 
 // SetOption sets a specific option for the OpenAI provider.
@@ -144,17 +154,43 @@ func (p *OpenAIProvider) SetOption(key string, value interface{}) {
 		delete(p.options, "max_tokens")
 	}
 
-	// if the option is reasoning_effort, check if the model supports it
+	// reasoning_effort: drop it for models that don't take the parameter, and clamp the level
+	// for those that do — the accepted set varies by GPT-5 minor version.
 	if key == "reasoning_effort" {
-		// if it doesn't, remove it from options
-		if !p.needsReasoningEffort() {
+		str, ok := optionString(value)
+		if !ok {
 			delete(p.options, "reasoning_effort")
+			return
 		}
+		normalized, ok := normalizeOpenAIReasoningEffort(p.model, str)
+		if !ok {
+			delete(p.options, "reasoning_effort")
+			return
+		}
+		value = normalized
 	}
 
-	if key == "temperature" {
-		if p.needsNoTemperature() {
-			delete(p.options, "temperature")
+	// verbosity is GPT-5-only, and only accepts low/medium/high. Anything else would be
+	// rejected for the whole request, so drop it here rather than send it.
+	if key == "verbosity" {
+		staged := map[string]interface{}{"verbosity": value}
+		applyOpenAIVerbosity(p.model, staged)
+		kept, ok := staged["verbosity"]
+		if !ok {
+			delete(p.options, "verbosity")
+			return
+		}
+		value = kept
+	}
+
+	// Reasoning models reject the whole sampling family; refuse to store any of it rather
+	// than let it reach a request.
+	if isOpenAIFamilyModel(p.model) && p.needsNoTemperature() {
+		for _, unsupported := range reasoningUnsupportedParams {
+			if key == unsupported {
+				delete(p.options, key)
+				return
+			}
 		}
 	}
 
@@ -346,15 +382,22 @@ func (p *OpenAIProvider) PrepareRequest(prompt string, options map[string]interf
 		}
 	}
 
-	// Handle reasoning_effort option
-	if !p.needsReasoningEffort() {
-		delete(mergedOptions, "reasoning_effort")
+	// Handle reasoning_effort: dropped for models that don't take it, and clamped to a level
+	// the rest actually accept — "xhigh" and "max" exist only on the newest GPT-5 models.
+	applyOpenAIReasoningEffort(p.model, mergedOptions)
+
+	// Chat Completions takes verbosity at the top level (unlike the Responses API, which
+	// nests it under text), but only GPT-5 reasoning models accept it at all.
+	applyOpenAIVerbosity(p.model, mergedOptions)
+
+	// parallel_tool_calls is unsupported on the o-series, and on GPT-5 at minimal effort.
+	if modelNeedsNoParallelToolCalls(p.model, mergedOptions) {
+		delete(mergedOptions, "parallel_tool_calls")
 	}
 
-	// Remove temperature from mergedOptions if model doesn't support it
-	if p.needsNoTemperature() {
-		delete(mergedOptions, "temperature")
-	}
+	// Reasoning models reject top_p, the penalties and the logprobs family as well as
+	// temperature; any one of them fails the whole request.
+	stripUnsupportedReasoningParams(p.model, mergedOptions)
 
 	// Remove tool_choice from request if model doesn't support it
 	if p.needsNoToolChoice() {
@@ -452,14 +495,22 @@ func (p *OpenAIProvider) PrepareRequestWithSchema(prompt string, options map[str
 		}
 	}
 
-	// Handle reasoning_effort option
-	if !p.needsReasoningEffort() {
-		delete(mergedOptions, "reasoning_effort")
+	// Handle reasoning_effort: dropped for models that don't take it, and clamped to a level
+	// the rest actually accept — "xhigh" and "max" exist only on the newest GPT-5 models.
+	applyOpenAIReasoningEffort(p.model, mergedOptions)
+
+	// Chat Completions takes verbosity at the top level (unlike the Responses API, which
+	// nests it under text), but only GPT-5 reasoning models accept it at all.
+	applyOpenAIVerbosity(p.model, mergedOptions)
+
+	// parallel_tool_calls is unsupported on the o-series, and on GPT-5 at minimal effort.
+	if modelNeedsNoParallelToolCalls(p.model, mergedOptions) {
+		delete(mergedOptions, "parallel_tool_calls")
 	}
 
-	if p.needsNoTemperature() {
-		delete(mergedOptions, "temperature")
-	}
+	// Reasoning models reject top_p, the penalties and the logprobs family as well as
+	// temperature; any one of them fails the whole request.
+	stripUnsupportedReasoningParams(p.model, mergedOptions)
 
 	// Add merged options to the request
 	for k, v := range mergedOptions {
@@ -1214,15 +1265,22 @@ func (p *OpenAIProvider) PrepareRequestWithMessages(messages []types.MemoryMessa
 		}
 	}
 
-	// Handle reasoning_effort option
-	if !p.needsReasoningEffort() {
-		delete(mergedOptions, "reasoning_effort")
+	// Handle reasoning_effort: dropped for models that don't take it, and clamped to a level
+	// the rest actually accept — "xhigh" and "max" exist only on the newest GPT-5 models.
+	applyOpenAIReasoningEffort(p.model, mergedOptions)
+
+	// Chat Completions takes verbosity at the top level (unlike the Responses API, which
+	// nests it under text), but only GPT-5 reasoning models accept it at all.
+	applyOpenAIVerbosity(p.model, mergedOptions)
+
+	// parallel_tool_calls is unsupported on the o-series, and on GPT-5 at minimal effort.
+	if modelNeedsNoParallelToolCalls(p.model, mergedOptions) {
+		delete(mergedOptions, "parallel_tool_calls")
 	}
 
-	// Remove temperature from mergedOptions if model doesn't support it
-	if p.needsNoTemperature() {
-		delete(mergedOptions, "temperature")
-	}
+	// Reasoning models reject top_p, the penalties and the logprobs family as well as
+	// temperature; any one of them fails the whole request.
+	stripUnsupportedReasoningParams(p.model, mergedOptions)
 
 	// Remove tool_choice from request if model doesn't support it
 	if p.needsNoToolChoice() {
@@ -1368,15 +1426,22 @@ func (p *OpenAIProvider) PrepareRequestWithMessagesAndSchema(messages []types.Me
 		}
 	}
 
-	// Handle reasoning_effort option
-	if !p.needsReasoningEffort() {
-		delete(mergedOptions, "reasoning_effort")
+	// Handle reasoning_effort: dropped for models that don't take it, and clamped to a level
+	// the rest actually accept — "xhigh" and "max" exist only on the newest GPT-5 models.
+	applyOpenAIReasoningEffort(p.model, mergedOptions)
+
+	// Chat Completions takes verbosity at the top level (unlike the Responses API, which
+	// nests it under text), but only GPT-5 reasoning models accept it at all.
+	applyOpenAIVerbosity(p.model, mergedOptions)
+
+	// parallel_tool_calls is unsupported on the o-series, and on GPT-5 at minimal effort.
+	if modelNeedsNoParallelToolCalls(p.model, mergedOptions) {
+		delete(mergedOptions, "parallel_tool_calls")
 	}
 
-	// Remove temperature from mergedOptions if model doesn't support it
-	if p.needsNoTemperature() {
-		delete(mergedOptions, "temperature")
-	}
+	// Reasoning models reject top_p, the penalties and the logprobs family as well as
+	// temperature; any one of them fails the whole request.
+	stripUnsupportedReasoningParams(p.model, mergedOptions)
 
 	// Remove tool_choice from request if model doesn't support it
 	if p.needsNoToolChoice() {
