@@ -18,9 +18,18 @@ func TestNeedsMaxCompletionTokens(t *testing.T) {
 		{"gpt-4-turbo", false, "GPT-4 Turbo model should not use max_completion_tokens"},
 		{"gpt-3.5-turbo", false, "GPT-3.5 Turbo model should not use max_completion_tokens"},
 		{"o1-preview", true, "o1-preview model should use max_completion_tokens"},
-		{"o-preview", true, "o-preview model should use max_completion_tokens"},
+		{"o3-mini", true, "o3-mini model should use max_completion_tokens"},
+		{"o4-mini", true, "o4-mini model should use max_completion_tokens"},
 		{"gpt-4o", true, "GPT-4o model should use max_completion_tokens"},
 		{"gpt-4o-mini", true, "GPT-4o mini model should use max_completion_tokens"},
+		{"gpt-5", true, "GPT-5 model should use max_completion_tokens"},
+		{"gpt-5.4-pro", true, "GPT-5.4 Pro model should use max_completion_tokens"},
+		// The o-series is o<digit>. A bare "o" prefix is not the o-series, and treating it as
+		// one sends max_completion_tokens to models that only accept max_tokens. This case
+		// previously expected true, from a substring match that also caught "omni-moderation"
+		// and "opus-3".
+		{"o-preview", false, "a bare o- prefix is not an o-series model"},
+		{"omni-moderation-latest", false, "omni-moderation is not an o-series model"},
 	}
 
 	for _, tc := range testCases {
