@@ -76,8 +76,9 @@ func (p *OpenAIProvider) needsMaxCompletionTokens() bool {
 	return modelNeedsMaxCompletionTokens(p.model)
 }
 
-// needsReasoningEffort reports whether the model accepts reasoning_effort: the o-series and the
-// GPT-5 family do, GPT-4o and GPT-4.1 do not.
+// needsReasoningEffort reports whether the model accepts reasoning_effort: the o-series (except
+// o1-mini), codex-mini, and the GPT-5 family do; GPT-4o/4.1 and the non-reasoning gpt-5-chat
+// variants do not. See modelNeedsReasoningEffort for the authoritative rule.
 func (p *OpenAIProvider) needsReasoningEffort() bool {
 	return modelNeedsReasoningEffort(p.model)
 }
@@ -116,8 +117,8 @@ func modelNeedsNoToolChoice(model string) bool {
 }
 
 // modelNeedsNoParallelToolCalls reports whether parallel_tool_calls must be withheld. No
-// o-series model supports it. GPT-5 does, except when reasoning_effort is "minimal", so the
-// effort in play is part of the question.
+// o-series model and not codex-mini support it. GPT-5 does, except when reasoning_effort is
+// "minimal", so the effort in play is part of the question.
 func modelNeedsNoParallelToolCalls(model string, opts map[string]interface{}) bool {
 	if isOSeriesModel(model) || isCodexMiniModel(model) {
 		return true

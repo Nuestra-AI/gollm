@@ -30,7 +30,9 @@ func TestVerbosityIsModelGatedAndShapedPerAPI(t *testing.T) {
 			t.Fatalf("PrepareRequest: %v", err)
 		}
 		var req map[string]interface{}
-		_ = json.Unmarshal(body, &req)
+		if err := json.Unmarshal(body, &req); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
 		if _, present := req["verbosity"]; present {
 			t.Errorf("verbosity reached a model that rejects it: %s", body)
 		}
@@ -39,9 +41,14 @@ func TestVerbosityIsModelGatedAndShapedPerAPI(t *testing.T) {
 	t.Run("invalid values are dropped rather than sent", func(t *testing.T) {
 		p := NewOpenAIProvider("key", "gpt-5", nil).(*OpenAIProvider)
 		p.SetOption("verbosity", "extremely")
-		body, _ := p.PrepareRequest("hi", nil)
+		body, err := p.PrepareRequest("hi", nil)
+		if err != nil {
+			t.Fatalf("PrepareRequest: %v", err)
+		}
 		var req map[string]interface{}
-		_ = json.Unmarshal(body, &req)
+		if err := json.Unmarshal(body, &req); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
 		if _, present := req["verbosity"]; present {
 			t.Errorf("an out-of-range verbosity would 400 the whole request: %s", body)
 		}
