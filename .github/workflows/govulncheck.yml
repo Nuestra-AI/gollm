@@ -1,0 +1,45 @@
+name: govulncheck
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # New CVEs land against unchanged code, so run weekly even when idle.
+    - cron: "17 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # Latest stable rather than go.mod's version: govulncheck reports
+          # vulnerabilities in the toolchain's own standard library, so an older
+          # Go fails the scan on stdlib CVEs that are not this module's problem.
+          # Scanning against a patched stdlib keeps the signal on our own
+          # dependencies. go.mod's `go` directive still governs what compiles.
+          go-version: stable
+          check-latest: true
+
+      - name: Run govulncheck
+        # Reports vulnerabilities reachable from this module's code.
+        #
+        # As of the last local run every finding was in the Go standard library
+        # and none were in our dependencies. Stdlib findings are fixed by the
+        # toolchain, not by us, so `go-version: stable` above is what clears
+        # them -- if a fresh stdlib CVE lands before its patch release ships,
+        # this job can go red on something this repo cannot fix. That is why it
+        # is not yet a required check on main.
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go version
+          govulncheck ./...

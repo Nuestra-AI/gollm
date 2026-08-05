@@ -1,0 +1,31 @@
+version: 2
+
+updates:
+  # Go module dependencies. Single module at the repo root.
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    # main requires a PR plus an approving review, so every ungrouped update
+    # would cost a separate review cycle. One grouped PR per week instead.
+    groups:
+      go-dependencies:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "chore(deps)"
+
+  # Keep Actions used by CI (CodeQL default setup, and anything added later)
+  # from drifting onto deprecated or vulnerable versions.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "chore(ci)"
