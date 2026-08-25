@@ -2,8 +2,11 @@ package providers
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/teilomillet/gollm/config"
 
 	"github.com/teilomillet/gollm/types"
 )
@@ -234,4 +237,105 @@ func TestRefusalsSurfaceAsErrors(t *testing.T) {
 			t.Errorf("text = %q, want %q", text, "here you go")
 		}
 	})
+}
+
+// TestSetDefaultOptionsForwardsSupportedSampling: each endpoint must receive the
+// sampling parameters it accepts and none of the Ollama-family ones, which OpenAI
+// takes on neither.
+func TestSetDefaultOptionsForwardsSupportedSampling(t *testing.T) {
+	minP, tfsZ := 0.05, 1.0
+	seed := 7
+	cfg := &config.Config{
+		Temperature: 0.3, MaxTokens: 256, TopP: 0.8,
+		FrequencyPenalty: 0.2, PresencePenalty: 0.4,
+		Seed: &seed, MinP: &minP, TfsZ: &tfsZ,
+	}
+
+	ollamaOnly := []string{"min_p", "top_k", "repeat_penalty", "repeat_last_n", "mirostat", "tfs_z"}
+
+	t.Run("chat", func(t *testing.T) {
+		p := NewOpenAIProvider("sk-t", "gpt-4o", nil)
+		p.SetDefaultOptions(cfg)
+		body, err := p.PrepareRequest("hi", map[string]interface{}{})
+		if err != nil {
+			t.Fatalf("PrepareRequest returned error: %v", err)
+		}
+		request := bodyKeys(t, body)
+		for key, want := range map[string]interface{}{
+			"temperature": 0.3, "top_p": 0.8,
+			"frequency_penalty": 0.2, "presence_penalty": 0.4, "seed": float64(7),
+		} {
+			got, present := request[key]
+			if !present {
+				t.Errorf("%q was not forwarded", key)
+				continue
+			}
+			if fmt.Sprint(got) != fmt.Sprint(want) {
+				t.Errorf("%q = %v, want %v", key, got, want)
+			}
+		}
+		for _, key := range ollamaOnly {
+			if _, present := request[key]; present {
+				t.Errorf("forwarded %q, which OpenAI does not accept", key)
+			}
+		}
+	})
+
+	t.Run("responses", func(t *testing.T) {
+		p := NewOpenAIResponsesProvider("sk-t", "gpt-4o", nil)
+		p.SetDefaultOptions(cfg)
+		body, err := p.PrepareRequest("hi", map[string]interface{}{})
+		if err != nil {
+			t.Fatalf("PrepareRequest returned error: %v", err)
+		}
+		request := bodyKeys(t, body)
+		if request["top_p"] == nil || request["temperature"] == nil {
+			t.Errorf("top_p/temperature not forwarded: %s", body)
+		}
+		// This API has none of these.
+		for _, key := range append([]string{"seed", "frequency_penalty", "presence_penalty"}, ollamaOnly...) {
+			if _, present := request[key]; present {
+				t.Errorf("forwarded %q, which /v1/responses does not accept", key)
+			}
+		}
+	})
+
+	t.Run("reasoning models still drop the sampling family", func(t *testing.T) {
+		p := NewOpenAIProvider("sk-t", "gpt-5.6-sol", nil)
+		p.SetDefaultOptions(cfg)
+		body, err := p.PrepareRequest("hi", map[string]interface{}{})
+		if err != nil {
+			t.Fatalf("PrepareRequest returned error: %v", err)
+		}
+		request := bodyKeys(t, body)
+		for _, key := range []string{"temperature", "top_p", "frequency_penalty", "presence_penalty"} {
+			if _, present := request[key]; present {
+				t.Errorf("forwarded %q to a reasoning model, which rejects it", key)
+			}
+		}
+	})
+}
+
+// TestSystemHistoryMessageUsesSystemRole: a system-role history message must take
+// the same role as the system prompt, so one request cannot carry both.
+func TestSystemHistoryMessageUsesSystemRole(t *testing.T) {
+	p := NewOpenAIProvider("sk-t", "gpt-4o", nil)
+	body, err := p.PrepareRequestWithMessages([]types.MemoryMessage{
+		{Role: "system", Content: "history sys"},
+		{Role: "user", Content: "hi"},
+	}, map[string]interface{}{"system_prompt": "prompt sys"})
+	if err != nil {
+		t.Fatalf("PrepareRequestWithMessages returned error: %v", err)
+	}
+
+	roles := map[string]bool{}
+	for _, m := range bodyKeys(t, body)["messages"].([]interface{}) {
+		roles[m.(map[string]interface{})["role"].(string)] = true
+	}
+	if roles["system"] && roles["developer"] {
+		t.Errorf("request carries both system and developer roles: %s", body)
+	}
+	if !roles["developer"] {
+		t.Errorf("expected the system role to be normalized to developer: %s", body)
+	}
 }

@@ -199,14 +199,21 @@ func (p *OpenAIProvider) SetOption(key string, value interface{}) {
 }
 
 // SetDefaultOptions configures standard options from the global configuration.
-// This includes temperature, max tokens, and sampling parameters.
+//
+// Forwards the sampling parameters /v1/chat/completions accepts. MinP, TopK,
+// RepeatPenalty, RepeatLastN, Mirostat, MirostatEta, MirostatTau and TfsZ are
+// deliberately absent: they are Ollama's, and OpenAI takes none of them on either
+// endpoint. SetOption drops the whole sampling family for reasoning models.
 func (p *OpenAIProvider) SetDefaultOptions(config *config.Config) {
 	p.SetOption("temperature", config.Temperature)
 	p.SetOption("max_tokens", config.MaxTokens)
+	p.SetOption("top_p", config.TopP)
+	p.SetOption("frequency_penalty", config.FrequencyPenalty)
+	p.SetOption("presence_penalty", config.PresencePenalty)
 	if config.Seed != nil {
 		p.SetOption("seed", *config.Seed)
 	}
-	p.logger.Debug("Default options set", "temperature", config.Temperature, "max_tokens", config.MaxTokens, "seed", config.Seed)
+	p.logger.Debug("Default options set", "temperature", config.Temperature, "max_tokens", config.MaxTokens, "top_p", config.TopP, "seed", config.Seed)
 }
 
 // Name returns "openai" as the provider identifier.
@@ -1137,8 +1144,14 @@ func (p *OpenAIProvider) buildOpenAIMessages(messages []types.MemoryMessage, opt
 
 	// Convert MemoryMessage objects to OpenAI messages format
 	for _, msg := range messages {
+		// A system-role history message takes the same role as the system prompt
+		// above, so one request cannot carry both "system" and "developer".
+		role := msg.Role
+		if role == "system" {
+			role = p.systemMessageRole()
+		}
 		message := map[string]interface{}{
-			"role": msg.Role,
+			"role": role,
 		}
 
 		// Handle tool result messages (role=tool)
