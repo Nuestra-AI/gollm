@@ -385,6 +385,8 @@ func (p *OpenAIProvider) PrepareRequest(prompt string, options map[string]interf
 	// Handle reasoning_effort: dropped for models that don't take it, and clamped to a level
 	// the rest actually accept — "xhigh" and "max" exist only on the newest GPT-5 models.
 	applyOpenAIReasoningEffort(p.model, mergedOptions)
+	// gpt-5.4+ reject function tools combined with reasoning here; see openai_shared.go.
+	applyOpenAIToolReasoningCarveOut(p.model, mergedOptions, options, p.logger)
 
 	// Chat Completions takes verbosity at the top level (unlike the Responses API, which
 	// nests it under text), but only GPT-5 reasoning models accept it at all.
@@ -498,6 +500,8 @@ func (p *OpenAIProvider) PrepareRequestWithSchema(prompt string, options map[str
 	// Handle reasoning_effort: dropped for models that don't take it, and clamped to a level
 	// the rest actually accept — "xhigh" and "max" exist only on the newest GPT-5 models.
 	applyOpenAIReasoningEffort(p.model, mergedOptions)
+	// gpt-5.4+ reject function tools combined with reasoning here; see openai_shared.go.
+	applyOpenAIToolReasoningCarveOut(p.model, mergedOptions, options, p.logger)
 
 	// Chat Completions takes verbosity at the top level (unlike the Responses API, which
 	// nests it under text), but only GPT-5 reasoning models accept it at all.
@@ -1284,6 +1288,8 @@ func (p *OpenAIProvider) PrepareRequestWithMessages(messages []types.MemoryMessa
 	// Handle reasoning_effort: dropped for models that don't take it, and clamped to a level
 	// the rest actually accept — "xhigh" and "max" exist only on the newest GPT-5 models.
 	applyOpenAIReasoningEffort(p.model, mergedOptions)
+	// gpt-5.4+ reject function tools combined with reasoning here; see openai_shared.go.
+	applyOpenAIToolReasoningCarveOut(p.model, mergedOptions, options, p.logger)
 
 	// Chat Completions takes verbosity at the top level (unlike the Responses API, which
 	// nests it under text), but only GPT-5 reasoning models accept it at all.
@@ -1445,6 +1451,8 @@ func (p *OpenAIProvider) PrepareRequestWithMessagesAndSchema(messages []types.Me
 	// Handle reasoning_effort: dropped for models that don't take it, and clamped to a level
 	// the rest actually accept — "xhigh" and "max" exist only on the newest GPT-5 models.
 	applyOpenAIReasoningEffort(p.model, mergedOptions)
+	// gpt-5.4+ reject function tools combined with reasoning here; see openai_shared.go.
+	applyOpenAIToolReasoningCarveOut(p.model, mergedOptions, options, p.logger)
 
 	// Chat Completions takes verbosity at the top level (unlike the Responses API, which
 	// nests it under text), but only GPT-5 reasoning models accept it at all.

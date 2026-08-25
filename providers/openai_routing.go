@@ -8,10 +8,19 @@ import "strings"
 
 // routeOpenAIProvider picks the OpenAI transport for a given model.
 //
-// Some OpenAI models cannot be served by /v1/chat/completions at all, and others
-// cannot be served by it once function tools are involved. For both groups,
-// handing the model to the default "openai" provider is a guaranteed API error,
-// so the registry transparently substitutes "openai-responses".
+// Some OpenAI models cannot be served by /v1/chat/completions at all. Handing one
+// of those to the default "openai" provider is a guaranteed API error, so the
+// registry transparently substitutes "openai-responses".
+//
+// Routing covers only that hard constraint. Models that /v1/chat/completions can
+// serve stay there, because /v1/responses measures several times slower and the
+// transport should not change under a caller who did not ask for it. The one
+// conditional restriction — gpt-5.4+ rejecting function tools combined with
+// reasoning — is handled on the Chat Completions path instead, by pinning
+// reasoning_effort to "none" for those requests; see
+// applyOpenAIToolReasoningCarveOut. Callers who would rather keep reasoning and
+// pay the latency select the Responses transport explicitly via
+// gollm.WithOpenAIResponsesAPI.
 //
 // Scope rules, in order:
 //
@@ -31,14 +40,7 @@ import "strings"
 // on both keep their existing transport so response shapes and usage fields stay
 // stable for downstream callers.
 //
-// Known gap: reasoning models below the GPT-5.4 bound (gpt-5 through gpt-5.3 and
-// the o-series) are reported to return the same 400 described on
-// rejectsToolsOnChatCompletions when reasoning_effort is set explicitly alongside
-// function tools. That report is second-hand and unconfirmed against a reproduced
-// error, so those models are left on Chat Completions rather than routed on a
-// guess; callers who hit it can select "openai-responses" explicitly via
-// gollm.WithOpenAIResponsesAPI. Confirm before widening the bound.
-//
+
 // Note for callers: LLM.GetProvider reports the transport actually in use, so a
 // routed model reads back as "openai-responses" even though "openai" was configured.
 func routeOpenAIProvider(name, model string) string {
@@ -46,7 +48,7 @@ func routeOpenAIProvider(name, model string) string {
 		return name
 	}
 	model = baseModelID(model)
-	if isResponsesOnlyModel(model) || rejectsToolsOnChatCompletions(model) {
+	if isResponsesOnlyModel(model) {
 		return "openai-responses"
 	}
 	return name
@@ -115,6 +117,11 @@ func isResponsesOnlyModel(model string) bool {
 // rejectsToolsOnChatCompletions reports whether a model fails on
 // /v1/chat/completions when function tools are combined with reasoning.
 //
+// This does not drive routing. It is the shared definition of the affected set,
+// consumed by applyOpenAIToolReasoningCarveOut on the Chat Completions path,
+// which keeps those requests working by sending reasoning_effort "none" rather
+// than by moving them to a slower transport.
+//
 // This deliberately contradicts the "supported endpoints" table on
 // developers.openai.com, which lists Chat Completions as "Supported" for these
 // models — and it is, for plain text. The moment a request pairs function tools
@@ -132,16 +139,8 @@ func isResponsesOnlyModel(model string) bool {
 //   - The GPT-5.6 frontier line (sol, terra, luna) reasons by default, so the
 //     rejection fires even with reasoning_effort omitted entirely.
 //
-// Both route. Only the second is strictly undeniable at construction time, but
-// routing the first as well is the better default: /v1/responses serves
-// everything these models do on Chat Completions and is the only transport that
-// keeps reasoning and tools together, so pinning them to Chat Completions buys
-// nothing and leaves a trap — code that works today breaks the moment a caller
-// adds reasoning_effort. OpenAI's own guidance points reasoning models at
-// Responses for the same reason.
-//
-// The other escape the error names, reasoning_effort "none", is not used here:
-// it switches off the reasoning these models are selected for.
+// Both shapes are covered by the same carve-out, since it pins the parameter
+// rather than relying on its absence.
 //
 // Expressed as a bound rather than an id list so later releases inherit it.
 //

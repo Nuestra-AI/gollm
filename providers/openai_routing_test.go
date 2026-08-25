@@ -142,18 +142,21 @@ func TestRouteOpenAIProvider(t *testing.T) {
 	}{
 		{"routes responses-only model", "openai", "o3-pro", "openai-responses"},
 		{"routes codex", "openai", "gpt-5.3-codex", "openai-responses"},
-		{"routes gpt-5.6 frontier line", "openai", "gpt-5.6-sol", "openai-responses"},
-		{"routes gpt-5.6-terra", "openai", "gpt-5.6-terra", "openai-responses"},
-		{"routes gpt-5.6-luna", "openai", "gpt-5.6-luna", "openai-responses"},
-		{"routes gpt-5.5", "openai", "gpt-5.5", "openai-responses"},
-		{"routes gpt-5.4", "openai", "gpt-5.4", "openai-responses"},
-		{"leaves gpt-5.3 alone", "openai", "gpt-5.3", "openai"},
+		// gpt-5.4+ stay on Chat Completions: their tool restriction is conditional
+		// and is handled there by applyOpenAIToolReasoningCarveOut, not by moving
+		// them to a transport that measures several times slower.
+		{"gpt-5.6 frontier line stays on chat", "openai", "gpt-5.6-sol", "openai"},
+		{"gpt-5.6-terra stays on chat", "openai", "gpt-5.6-terra", "openai"},
+		{"gpt-5.6-luna stays on chat", "openai", "gpt-5.6-luna", "openai"},
+		{"gpt-5.5 stays on chat", "openai", "gpt-5.5", "openai"},
+		{"gpt-5.4 stays on chat", "openai", "gpt-5.4", "openai"},
+		{"gpt-5.3 stays on chat", "openai", "gpt-5.3", "openai"},
 		{"leaves gpt-4o alone", "openai", "gpt-4o", "openai"},
 
 		// Explicit choices are never rewritten, in either direction.
 		{"explicit responses stays", "openai-responses", "gpt-4o", "openai-responses"},
 		{"explicit chat pin stays", "openai-chat", "o3-pro", "openai-chat"},
-		{"explicit chat pin stays for frontier", "openai-chat", "gpt-5.6-sol", "openai-chat"},
+		{"explicit chat pin stays for codex", "openai-chat", "gpt-5-codex", "openai-chat"},
 
 		// OpenAI-compatible providers have different (or absent) Responses
 		// support and must never be rerouted, even on a matching model id.
@@ -198,9 +201,8 @@ func TestRegistryGetRoutes(t *testing.T) {
 	}{
 		{"responses-only model gets responses provider", "openai", "gpt-5-pro", "openai-responses"},
 		{"ordinary model keeps chat provider", "openai", "gpt-4o", "openai"},
-		{"frontier model gets responses provider", "openai", "gpt-5.6-sol", "openai-responses"},
-		{"gpt-5.5 gets responses provider", "openai", "gpt-5.5", "openai-responses"},
-		{"gpt-5.3 keeps chat provider", "openai", "gpt-5.3", "openai"},
+		{"frontier model keeps chat provider", "openai", "gpt-5.6-sol", "openai"},
+		{"gpt-5.5 keeps chat provider", "openai", "gpt-5.5", "openai"},
 		{"chat pin resists routing", "openai-chat", "gpt-5-pro", "openai"},
 		{"explicit responses honored", "openai-responses", "gpt-4o", "openai-responses"},
 	}
@@ -317,7 +319,7 @@ func TestFineTunedModelsRouteOnBaseModel(t *testing.T) {
 	}{
 		{"customer name containing pro", "ft:gpt-4o-mini-2024-07-18:acme:sales-pro-v2:AbC123", "openai"},
 		{"customer name containing codex", "ft:gpt-4o-mini-2024-07-18:acme:codex-helper:AbC123", "openai"},
-		{"fine-tune of a routed base still routes", "ft:gpt-5.6-sol:acme:tuned:AbC123", "openai-responses"},
+		{"fine-tune of a routed base still routes", "ft:gpt-5-codex:acme:tuned:AbC123", "openai-responses"},
 		{"malformed ft id falls back to whole string", "ft:", "openai"},
 	}
 	for _, tt := range tests {

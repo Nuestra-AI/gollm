@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/teilomillet/gollm/types"
+	"github.com/teilomillet/gollm/utils"
 )
 
 // parseOpenAICompatStreamChunk parses one SSE data payload from an OpenAI-shaped chat completions
@@ -535,6 +536,59 @@ func pinnedEffortModel(model string) (string, bool) {
 		return "high", true
 	}
 	return "", false
+}
+
+// hasOpenAIFunctionTools reports whether a request carries at least one function tool that will
+// actually reach the Chat Completions body. web_search is excluded because the Chat path filters
+// it out before building the body (that API has no built-in tools), so a request carrying only
+// web_search sends no tools at all and is not subject to the restriction below.
+func hasOpenAIFunctionTools(options map[string]interface{}) bool {
+	tools, ok := options["tools"].([]utils.Tool)
+	if !ok {
+		return false
+	}
+	for _, tool := range tools {
+		if tool.Type != "web_search" {
+			return true
+		}
+	}
+	return false
+}
+
+// applyOpenAIToolReasoningCarveOut keeps a tool-carrying Chat Completions request from being
+// rejected, by pinning reasoning_effort to "none" on the models that refuse the combination.
+//
+// From gpt-5.4 onward, pairing function tools with reasoning on /v1/chat/completions fails:
+//
+//	Function tools with reasoning_effort are not supported for gpt-5.6-sol in
+//	/v1/chat/completions. To use function tools, use /v1/responses or set
+//	reasoning_effort to 'none'
+//
+// The parameter must be *sent* as "none" rather than simply omitted. Omitting works for gpt-5.4
+// and gpt-5.5, but the GPT-5.6 line reasons by default and still fails, so silence is not a
+// carve-out. Every affected model accepts "none" (supportsEffortNone covers gpt-5.1 and later).
+//
+// This trades reasoning quality for the Chat Completions latency profile, which is the right
+// default — /v1/responses measures several times slower — but it is a real reduction in model
+// capability, so it is logged when it fires. Callers who would rather keep reasoning and pay the
+// latency should select the Responses transport explicitly via gollm.WithOpenAIResponsesAPI.
+//
+// Applied after applyOpenAIReasoningEffort so it overrides a level that helper just normalized,
+// and it takes the raw per-call options because the merged map deliberately excludes "tools".
+func applyOpenAIToolReasoningCarveOut(model string, merged, options map[string]interface{}, logger utils.Logger) {
+	if !rejectsToolsOnChatCompletions(model) || !hasOpenAIFunctionTools(options) {
+		return
+	}
+	previous, had := merged["reasoning_effort"]
+	merged["reasoning_effort"] = string(types.ReasoningEffortNone)
+	if logger == nil || !had {
+		return
+	}
+	if effort, ok := optionString(previous); ok && effort != string(types.ReasoningEffortNone) {
+		logger.Warn("Reasoning disabled: this model rejects function tools combined with reasoning "+
+			"on /v1/chat/completions. Use the openai-responses provider to keep reasoning with tools.",
+			"model", model, "requested_reasoning_effort", effort)
+	}
 }
 
 // applyOpenAIReasoningEffort normalizes or removes the reasoning_effort entry in a prepared
