@@ -452,8 +452,11 @@ func (p *OpenAIResponsesProvider) parseResponseInternal(body []byte) (string, *t
 
 			// message content
 			Content []struct {
-				Type        string `json:"type"`
-				Text        string `json:"text,omitempty"`
+				Type string `json:"type"`
+				Text string `json:"text,omitempty"`
+				// Carried on a "refusal" part when the model declines; the part has
+				// no output_text, so without this the response parses as empty.
+				Refusal     string `json:"refusal,omitempty"`
 				Annotations []struct {
 					Type       string `json:"type"`
 					StartIndex int    `json:"start_index,omitempty"`
@@ -525,6 +528,7 @@ func (p *OpenAIResponsesProvider) parseResponseInternal(body []byte) (string, *t
 	var functionCalls []string
 	var hasWebSearch bool
 	var webSearchOutput []interface{}
+	var refusal string
 
 	for _, item := range response.Output {
 		switch item.Type {
@@ -532,6 +536,9 @@ func (p *OpenAIResponsesProvider) parseResponseInternal(body []byte) (string, *t
 			for _, c := range item.Content {
 				if c.Type == "output_text" && c.Text != "" {
 					textContent.WriteString(c.Text)
+				}
+				if c.Type == "refusal" && c.Refusal != "" {
+					refusal = c.Refusal
 				}
 			}
 
@@ -618,7 +625,13 @@ func (p *OpenAIResponsesProvider) parseResponseInternal(body []byte) (string, *t
 				webSearchOutput = append(webSearchOutput, itemMap)
 			}
 		}
-		return parseResponsesWebSearchOutput(webSearchOutput, details)
+		text, details, err := parseResponsesWebSearchOutput(webSearchOutput, details)
+		// Same rule as below: a refusal alongside real output never suppresses it,
+		// but a search that produced nothing is explained by the refusal.
+		if err == nil && text == "" && refusal != "" {
+			return "", details, fmt.Errorf("%w: %s", types.ErrRefusal, refusal)
+		}
+		return text, details, err
 	}
 
 	if textContent.Len() > 0 {
@@ -627,6 +640,12 @@ func (p *OpenAIResponsesProvider) parseResponseInternal(body []byte) (string, *t
 
 	if len(functionCalls) > 0 {
 		return strings.Join(functionCalls, "\n"), details, nil
+	}
+
+	// Checked after text and tool calls so a refusal accompanying real output
+	// never suppresses it; alone, it is the reason this response is empty.
+	if refusal != "" {
+		return "", details, fmt.Errorf("%w: %s", types.ErrRefusal, refusal)
 	}
 
 	return "", details, fmt.Errorf("no content in response")

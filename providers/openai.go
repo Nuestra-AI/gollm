@@ -572,6 +572,7 @@ func (p *OpenAIProvider) ParseResponse(body []byte) (string, error) {
 		Choices []struct {
 			Message struct {
 				Content   string `json:"content"`
+				Refusal   string `json:"refusal"`
 				ToolCalls []struct {
 					ID       string `json:"id"`
 					Type     string `json:"type"`
@@ -597,6 +598,11 @@ func (p *OpenAIProvider) ParseResponse(body []byte) (string, error) {
 	}
 
 	message := response.Choices[0].Message
+
+	// See ParseResponseWithUsage: a refusal carries its reason outside content.
+	if message.Refusal != "" && message.Content == "" && len(message.ToolCalls) == 0 {
+		return "", fmt.Errorf("%w: %s", types.ErrRefusal, message.Refusal)
+	}
 
 	var parts []string
 	if message.Content != "" {
@@ -644,7 +650,10 @@ func (p *OpenAIProvider) ParseResponseWithUsage(body []byte) (string, *types.Res
 		Model   string `json:"model"`
 		Choices []struct {
 			Message struct {
-				Content   string `json:"content"`
+				Content string `json:"content"`
+				// Set instead of content when the model declines. Without it a refusal
+				// parses as an empty completion and reads as success.
+				Refusal   string `json:"refusal"`
 				ToolCalls []struct {
 					ID       string `json:"id"`
 					Type     string `json:"type"`
@@ -781,6 +790,13 @@ func (p *OpenAIProvider) ParseResponseWithUsage(body []byte) (string, *types.Res
 	}
 
 	message := response.Choices[0].Message
+
+	// A refusal is a completed call with no completion: the model declined. It
+	// arrives with content empty, so without this it falls through to the generic
+	// "no content" error and loses the reason the caller needs.
+	if message.Refusal != "" && message.Content == "" && len(message.ToolCalls) == 0 {
+		return "", details, fmt.Errorf("%w: %s", types.ErrRefusal, message.Refusal)
+	}
 
 	var parts []string
 	if message.Content != "" {
