@@ -339,3 +339,37 @@ func TestSystemHistoryMessageUsesSystemRole(t *testing.T) {
 		t.Errorf("expected the system role to be normalized to developer: %s", body)
 	}
 }
+
+// TestZeroTopPIsTreatedAsUnset: NewConfig leaves TopP at Go's zero, which passes
+// the gte=0 validation. top_p 0 is degenerate sampling, not "unset", so it must
+// never reach a request.
+func TestZeroTopPIsTreatedAsUnset(t *testing.T) {
+	cfg := &config.Config{Temperature: 0.7, MaxTokens: 100} // TopP zero, as NewConfig leaves it
+
+	t.Run("chat", func(t *testing.T) {
+		p := NewOpenAIProvider("sk-t", "gpt-4o", nil)
+		p.SetDefaultOptions(cfg)
+		body, _ := p.PrepareRequest("hi", map[string]interface{}{})
+		if v, present := bodyKeys(t, body)["top_p"]; present {
+			t.Errorf("sent top_p=%v; zero must be treated as unset", v)
+		}
+	})
+
+	t.Run("responses", func(t *testing.T) {
+		p := NewOpenAIResponsesProvider("sk-t", "gpt-4o", nil)
+		p.SetDefaultOptions(cfg)
+		body, _ := p.PrepareRequest("hi", map[string]interface{}{})
+		if v, present := bodyKeys(t, body)["top_p"]; present {
+			t.Errorf("sent top_p=%v; zero must be treated as unset", v)
+		}
+	})
+
+	t.Run("a real value still passes through", func(t *testing.T) {
+		p := NewOpenAIProvider("sk-t", "gpt-4o", nil)
+		p.SetDefaultOptions(&config.Config{Temperature: 0.7, MaxTokens: 100, TopP: 0.8})
+		body, _ := p.PrepareRequest("hi", map[string]interface{}{})
+		if bodyKeys(t, body)["top_p"] != 0.8 {
+			t.Errorf("top_p = %v, want 0.8", bodyKeys(t, body)["top_p"])
+		}
+	})
+}

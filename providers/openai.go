@@ -204,10 +204,16 @@ func (p *OpenAIProvider) SetOption(key string, value interface{}) {
 // RepeatPenalty, RepeatLastN, Mirostat, MirostatEta, MirostatTau and TfsZ are
 // deliberately absent: they are Ollama's, and OpenAI takes none of them on either
 // endpoint. SetOption drops the whole sampling family for reasoning models.
+//
+// TopP is forwarded only when positive: the constructors disagree — LoadConfig
+// applies the envDefault of 0.9, NewConfig leaves Go's zero — and top_p 0 is
+// degenerate rather than unset, so a zero is treated as unset.
 func (p *OpenAIProvider) SetDefaultOptions(config *config.Config) {
 	p.SetOption("temperature", config.Temperature)
 	p.SetOption("max_tokens", config.MaxTokens)
-	p.SetOption("top_p", config.TopP)
+	if config.TopP > 0 {
+		p.SetOption("top_p", config.TopP)
+	}
 	p.SetOption("frequency_penalty", config.FrequencyPenalty)
 	p.SetOption("presence_penalty", config.PresencePenalty)
 	if config.Seed != nil {

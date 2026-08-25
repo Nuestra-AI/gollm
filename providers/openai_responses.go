@@ -106,10 +106,14 @@ func (p *OpenAIResponsesProvider) SetOption(key string, value interface{}) {
 // Narrower than the Chat Completions set: this API has no seed, frequency_penalty
 // or presence_penalty. Nor the Ollama family (MinP, RepeatPenalty, Mirostat*,
 // TfsZ), which OpenAI takes on neither endpoint.
+//
+// TopP is forwarded only when positive; see the note on OpenAIProvider.
 func (p *OpenAIResponsesProvider) SetDefaultOptions(cfg *config.Config) {
 	p.SetOption("temperature", cfg.Temperature)
 	p.SetOption("max_tokens", cfg.MaxTokens)
-	p.SetOption("top_p", cfg.TopP)
+	if cfg.TopP > 0 {
+		p.SetOption("top_p", cfg.TopP)
+	}
 }
 
 // ---------------------------------------------------------------------------
