@@ -163,13 +163,30 @@ var bedrockSamplingFields = map[string]map[string]string{
 // under that family's field names, per-request options winning.
 func (p *BedrockProvider) applyBedrockSampling(target map[string]interface{}, family string, options map[string]interface{}) {
 	for name, wire := range bedrockSamplingFields[family] {
-		if value, ok := p.options[name]; ok {
+		if value, ok := bedrockSamplingValue(p.options, name); ok {
 			target[wire] = value
 		}
-		if value, ok := options[name]; ok {
+		if value, ok := bedrockSamplingValue(options, name); ok {
 			target[wire] = value
 		}
 	}
+}
+
+// bedrockSamplingValue reads one sampling value out of a source map, accepting any of
+// the three spellings a stop list travels under. Bedrock assembles its bodies by hand
+// and so never reaches normalizeStopSequences, which does this for every other
+// provider; without it a stop list stops working on a move to Bedrock.
+func bedrockSamplingValue(source map[string]interface{}, name string) (interface{}, bool) {
+	if name != "stop" {
+		value, ok := source[name]
+		return value, ok
+	}
+	for _, alias := range stopWireNames {
+		if value, ok := source[alias]; ok {
+			return coerceStopValue(value), true
+		}
+	}
+	return nil, false
 }
 
 // getModelFamily returns the model family for request formatting

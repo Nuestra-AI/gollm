@@ -455,8 +455,14 @@ func (p *OllamaProvider) PrepareRequestWithMessages(messages []types.MemoryMessa
 	// Collect any images from messages
 	var allImages []string
 
-	// Add system prompt if present
-	if systemPrompt, ok := options["system_prompt"].(string); ok && systemPrompt != "" {
+	// Add system prompt if present, provider-level included: this path flattens the
+	// prompt before the p.options merge, so reading only the per-request options
+	// dropped a prompt set with SetOption. Per-request wins.
+	systemPrompt, _ := p.options["system_prompt"].(string)
+	if perRequest, ok := options["system_prompt"].(string); ok && perRequest != "" {
+		systemPrompt = perRequest
+	}
+	if systemPrompt != "" {
 		flattenedPrompt.WriteString("System: ")
 		flattenedPrompt.WriteString(systemPrompt)
 		flattenedPrompt.WriteString("\n\n")

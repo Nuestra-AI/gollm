@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/teilomillet/gollm/config"
+	"github.com/teilomillet/gollm/types"
 	"github.com/teilomillet/gollm/utils"
 )
 
@@ -1079,4 +1080,93 @@ func TestAnthropicThinkingModeByModel(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestOllamaMessagesPathSystemPrompt covers the messages path, which flattens the
+// prompt before the provider-defaults merge: reading only the per-request options
+// there dropped a system prompt set with SetOption.
+func TestOllamaMessagesPathSystemPrompt(t *testing.T) {
+	messages := []types.MemoryMessage{{Role: "user", Content: "hi"}}
+
+	t.Run("provider level is applied", func(t *testing.T) {
+		p := NewOllamaProvider("", "llama3.2", nil)
+		p.SetOption("system_prompt", "PROVIDER_SYS")
+
+		body, err := p.PrepareRequestWithMessages(messages, map[string]interface{}{})
+		if err != nil {
+			t.Fatalf("PrepareRequestWithMessages failed: %v", err)
+		}
+		decoded := decodeBody(t, body)
+		prompt, _ := decoded["prompt"].(string)
+		if !strings.Contains(prompt, "PROVIDER_SYS") {
+			t.Errorf("prompt = %q, want the provider-level system prompt", prompt)
+		}
+		assertAbsent(t, decoded, "system_prompt")
+	})
+
+	t.Run("per-request wins", func(t *testing.T) {
+		p := NewOllamaProvider("", "llama3.2", nil)
+		p.SetOption("system_prompt", "PROVIDER_SYS")
+
+		body, err := p.PrepareRequestWithMessages(messages, map[string]interface{}{
+			"system_prompt": "CALL_SYS",
+		})
+		if err != nil {
+			t.Fatalf("PrepareRequestWithMessages failed: %v", err)
+		}
+		prompt, _ := decodeBody(t, body)["prompt"].(string)
+		if !strings.Contains(prompt, "CALL_SYS") {
+			t.Errorf("prompt = %q, want the per-request system prompt", prompt)
+		}
+		if strings.Contains(prompt, "PROVIDER_SYS") {
+			t.Errorf("prompt = %q, provider-level prompt should have been replaced", prompt)
+		}
+	})
+}
+
+// TestBedrockAcceptsEveryStopSpelling covers the one provider that assembles bodies by
+// hand and so never reaches normalizeStopSequences: a stop list must not stop working
+// on a move to Bedrock just because the caller used another provider's spelling.
+func TestBedrockAcceptsEveryStopSpelling(t *testing.T) {
+	for _, callerKey := range stopWireNames {
+		t.Run(callerKey, func(t *testing.T) {
+			p := NewBedrockProvider("k", "anthropic.claude-3-5-sonnet-20241022-v2:0", nil)
+
+			body, err := p.PrepareRequest("hi", map[string]interface{}{
+				"max_tokens": 100, callerKey: wantStop,
+			})
+			if err != nil {
+				t.Fatalf("PrepareRequest failed: %v", err)
+			}
+			assertStop(t, decodeBody(t, body), "stop_sequences")
+		})
+	}
+
+	t.Run("mistral family keeps its own field name", func(t *testing.T) {
+		p := NewBedrockProvider("k", "mistral.mistral-7b-instruct-v0:2", nil)
+
+		body, err := p.PrepareRequest("hi", map[string]interface{}{"stop_sequences": wantStop})
+		if err != nil {
+			t.Fatalf("PrepareRequest failed: %v", err)
+		}
+		decoded := decodeBody(t, body)
+		assertStop(t, decoded, "stop")
+		assertAbsent(t, decoded, "stop_sequences")
+	})
+
+	t.Run("a bare string widens to a list", func(t *testing.T) {
+		p := NewBedrockProvider("k", "anthropic.claude-3-5-sonnet-20241022-v2:0", nil)
+
+		body, err := p.PrepareRequest("hi", map[string]interface{}{
+			"max_tokens": 100, "stop": "END",
+		})
+		if err != nil {
+			t.Fatalf("PrepareRequest failed: %v", err)
+		}
+		raw := decodeBody(t, body)["stop_sequences"]
+		list, ok := raw.([]interface{})
+		if !ok || len(list) != 1 || list[0] != "END" {
+			t.Errorf("stop_sequences = %v, want the one-element list [END]", raw)
+		}
+	})
 }

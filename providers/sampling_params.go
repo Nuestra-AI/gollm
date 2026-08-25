@@ -295,6 +295,15 @@ var (
 	ollamaSupportedParams     = supportedSampling(ollamaSamplingParams)
 )
 
+// coerceStopValue widens a lone stop string into the list the array-only APIs need.
+// A bare string is legal on OpenAI but rejected by Anthropic and Cohere.
+func coerceStopValue(value interface{}) interface{} {
+	if single, ok := value.(string); ok {
+		return []string{single}
+	}
+	return value
+}
+
 // stopWireNames are the names the same stop-sequence list travels under.
 var stopWireNames = []string{"stop", "stop_sequences", "stopSequences"}
 
@@ -325,10 +334,7 @@ func normalizeStopSequences(request map[string]interface{}, supported map[string
 		if !present {
 			continue
 		}
-		// A lone string is legal on OpenAI but not on the array-only APIs.
-		if single, isString := value.(string); isString {
-			value = []string{single}
-		}
+		value = coerceStopValue(value)
 		if name != target {
 			delete(request, name)
 		}
