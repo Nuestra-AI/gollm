@@ -123,8 +123,8 @@ func TestRejectsToolsOnChatCompletions(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := rejectsToolsOnChatCompletions(tt.model); got != tt.want {
-				t.Errorf("rejectsToolsOnChatCompletions(%q) = %v, want %v",
+			if got := ModelRejectsToolsOnChatCompletions(tt.model); got != tt.want {
+				t.Errorf("ModelRejectsToolsOnChatCompletions(%q) = %v, want %v",
 					tt.model, got, tt.want)
 			}
 		})
@@ -335,12 +335,12 @@ func TestFineTunedModelsRouteOnBaseModel(t *testing.T) {
 // the routing bound, which the gpt-5-chat prefix predicate could never reach.
 func TestFutureChatVariantIsExcluded(t *testing.T) {
 	for _, model := range []string{"gpt-5.6-chat-latest", "gpt-5.4-chat"} {
-		if rejectsToolsOnChatCompletions(model) {
-			t.Errorf("rejectsToolsOnChatCompletions(%q) = true; non-reasoning chat variants have no reasoning to conflict with tools", model)
+		if ModelRejectsToolsOnChatCompletions(model) {
+			t.Errorf("ModelRejectsToolsOnChatCompletions(%q) = true; non-reasoning chat variants have no reasoning to conflict with tools", model)
 		}
 	}
 	// The reasoning models above the bound must still route.
-	if !rejectsToolsOnChatCompletions("gpt-5.6-sol") {
+	if !ModelRejectsToolsOnChatCompletions("gpt-5.6-sol") {
 		t.Error("gpt-5.6-sol must still route")
 	}
 }

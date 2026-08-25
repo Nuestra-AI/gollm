@@ -125,8 +125,16 @@ var (
 	// API mode selection
 	WithOpenAIResponsesAPI = config.WithOpenAIResponsesAPI // Switches to OpenAI Responses API (/v1/responses)
 
+	// Tool + reasoning policy: from gpt-5.4 onward, Chat Completions rejects
+	// function tools combined with reasoning. See config.ToolReasoningPolicy.
+	WithOpenAIToolReasoning = config.WithOpenAIToolReasoning // Selects speed or reasoning for tool-carrying requests
+
 	// Configuration creation
 	NewConfig = config.NewConfig // Creates a new Config with default values
+
+	// Tool + reasoning policy values
+	ToolReasoningPreferSpeed   = config.ToolReasoningPreferSpeed   // Stay on Chat Completions, drop reasoning when tools are present (default)
+	ToolReasoningPreferQuality = config.ToolReasoningPreferQuality // Use the Responses API so reasoning and tools can coexist
 
 	// Logger utilities
 	NewNopLogger = utils.NewNopLogger // Creates a no-op logger that discards all output

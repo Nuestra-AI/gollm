@@ -538,6 +538,54 @@ func pinnedEffortModel(model string) (string, bool) {
 	return "", false
 }
 
+// ModelRejectsToolsOnChatCompletions reports whether a model fails on
+// /v1/chat/completions when function tools are combined with reasoning.
+//
+// This does not drive automatic routing. It is the shared definition of the
+// affected set, consumed by applyOpenAIToolReasoningCarveOut on the Chat
+// Completions path — which keeps those requests working by sending
+// reasoning_effort "none" rather than moving them to a slower transport — and
+// exported so a caller-selected transport policy can consult the same set.
+//
+// This deliberately contradicts the "supported endpoints" table on
+// developers.openai.com, which lists Chat Completions as "Supported" for these
+// models — and it is, for plain text. The moment a request pairs function tools
+// with reasoning, the API returns 400:
+//
+//	Function tools with reasoning_effort are not supported for gpt-5.6-sol in
+//	/v1/chat/completions. To use function tools, use /v1/responses or set
+//	reasoning_effort to 'none'
+//
+// The bound is GPT-5.4, where the restriction was introduced. Within it the
+// failure comes in two shapes:
+//
+//   - gpt-5.4 and gpt-5.5 fail when the caller sets reasoning_effort explicitly
+//     alongside tools.
+//   - The GPT-5.6 frontier line (sol, terra, luna) reasons by default, so the
+//     rejection fires even with reasoning_effort omitted entirely.
+//
+// Both shapes are covered by the same carve-out, since it pins the parameter
+// rather than relying on its absence.
+//
+// Expressed as a bound rather than an id list so later releases inherit it.
+//
+// Verified 2026-08-25 from the 400 reproduced across litellm (#33221), LibreChat
+// (#14231, #14355), pipecat (#4043, on gpt-5.4) and ruby_llm (#785). OpenAI has
+// not documented the restriction in the API reference or changelog, so this rule
+// rests on reproduced behavior rather than published spec — re-check before
+// removing it.
+func ModelRejectsToolsOnChatCompletions(model string) bool {
+	minor, isGPT5 := gpt5MinorVersion(model)
+	if !isGPT5 || minor < 4 {
+		return false
+	}
+	// The non-reasoning chat variants have no reasoning to conflict with tools.
+	// Matched on a "chat" segment rather than isGPT5ChatModel, which is anchored
+	// to the "gpt-5-chat" prefix and so can only ever match minor 0 — below this
+	// bound already. A future "gpt-5.6-chat-latest" needs this to exclude it.
+	return !hasModelSegment(model, "chat")
+}
+
 // hasOpenAIFunctionTools reports whether a request carries at least one function tool that will
 // actually reach the Chat Completions body. web_search is excluded because the Chat path filters
 // it out before building the body (that API has no built-in tools), so a request carrying only
@@ -576,7 +624,7 @@ func hasOpenAIFunctionTools(options map[string]interface{}) bool {
 // Applied after applyOpenAIReasoningEffort so it overrides a level that helper just normalized,
 // and it takes the raw per-call options because the merged map deliberately excludes "tools".
 func applyOpenAIToolReasoningCarveOut(model string, merged, options map[string]interface{}, logger utils.Logger) {
-	if !rejectsToolsOnChatCompletions(model) || !hasOpenAIFunctionTools(options) {
+	if !ModelRejectsToolsOnChatCompletions(model) || !hasOpenAIFunctionTools(options) {
 		return
 	}
 	previous, had := merged["reasoning_effort"]

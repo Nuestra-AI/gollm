@@ -320,6 +320,10 @@ func NewLLM(opts ...ConfigOption) (LLM, error) {
 		opt(cfg)
 	}
 
+	// Resolve the tool+reasoning policy before the key alias below, so a client it
+	// switches to "openai-responses" still resolves the OpenAI key.
+	applyOpenAIToolReasoningPolicy(cfg)
+
 	// The OpenAI transport aliases all authenticate with the OpenAI key
 	ensureOpenAIAliasKey(cfg)
 
@@ -384,6 +388,35 @@ func NewLLM(opts ...ConfigOption) (LLM, error) {
 	}
 
 	return llmInstance, nil
+}
+
+// applyOpenAIToolReasoningPolicy selects the Responses transport for callers who
+// asked to keep reasoning on tool-carrying requests.
+//
+// From gpt-5.4 onward, /v1/chat/completions rejects function tools combined with
+// reasoning. The default (ToolReasoningPreferSpeed) keeps those requests on Chat
+// Completions and gives up reasoning for them, because /v1/responses measures
+// several times slower. ToolReasoningPreferQuality makes the opposite trade, and
+// the only way to honor it is to move the client to /v1/responses — the one
+// transport that accepts both together.
+//
+// Resolved here, at config time, rather than in the provider registry: the
+// registry sees only a name and a model, and a per-request decision is not
+// available to it anyway, since a client is built once and speaks to one endpoint
+// for its lifetime. Rewriting the provider name keeps both this constructor and
+// llm.NewLLM in agreement without threading policy through the registry.
+//
+// Only the bare "openai" provider is affected — an explicit transport choice is
+// already a stronger statement of intent than the policy — and only for models
+// that actually carry the restriction, so choosing prefer-quality does not drag
+// gpt-4o or the o-series onto a slower endpoint for no benefit.
+func applyOpenAIToolReasoningPolicy(cfg *config.Config) {
+	if cfg.Provider != "openai" || cfg.ToolReasoning != config.ToolReasoningPreferQuality {
+		return
+	}
+	if providers.ModelRejectsToolsOnChatCompletions(cfg.Model) {
+		cfg.Provider = "openai-responses"
+	}
 }
 
 // openAIAliasProviders are the fork-added provider names that select a specific
