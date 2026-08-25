@@ -308,12 +308,17 @@ func (l *LLMImpl) Generate(ctx context.Context, prompt *Prompt, opts ...Generate
 	if prompt.SystemPrompt != "" {
 		l.SetOption("system_prompt", prompt.SystemPrompt)
 	}
+	var lastErr error
 	for attempt := 0; attempt <= l.MaxRetries; attempt++ {
 		l.logger.Debug("Generating text", "provider", l.Provider.Name(), "prompt", prompt.String(), "system_prompt", prompt.SystemPrompt, "attempt", attempt+1)
 		// Pass the entire Prompt struct to attemptGenerate
 		result, err := l.attemptGenerate(ctx, prompt, attempt)
 		if err == nil {
 			return result, nil
+		}
+		lastErr = err
+		if isTerminalError(err) {
+			return "", err
 		}
 		l.logger.Warn("Generation attempt failed", "error", err, "attempt", attempt+1)
 		if attempt < l.MaxRetries {
@@ -323,7 +328,7 @@ func (l *LLMImpl) Generate(ctx context.Context, prompt *Prompt, opts ...Generate
 			}
 		}
 	}
-	return "", fmt.Errorf("failed to generate after %d attempts", l.MaxRetries+1)
+	return "", fmt.Errorf("failed to generate after %d attempts: %w", l.MaxRetries+1, lastErr)
 }
 
 // wait implements a cancellable delay between retry attempts.
@@ -481,6 +486,11 @@ func (l *LLMImpl) GenerateWithSchema(ctx context.Context, prompt *Prompt, schema
 			return result, nil
 		}
 
+		// A refusal is deterministic; retrying only buys another billed refusal.
+		if isTerminalError(lastErr) {
+			break
+		}
+
 		l.logger.Warn("Generation attempt with schema failed", "error", lastErr, "attempt", attempt+1)
 
 		if attempt < l.MaxRetries {
@@ -529,6 +539,11 @@ func (l *LLMImpl) GenerateWithUsage(ctx context.Context, prompt *Prompt, opts ..
 			return result, details, nil
 		}
 
+		// A refusal is deterministic; retrying only buys another billed refusal.
+		if isTerminalError(lastErr) {
+			break
+		}
+
 		l.logger.Warn("Generation attempt failed", "error", lastErr, "attempt", attempt+1)
 		if attempt < l.MaxRetries {
 			if err := l.wait(ctx); err != nil {
@@ -567,6 +582,11 @@ func (l *LLMImpl) GenerateWithSchemaAndUsage(ctx context.Context, prompt *Prompt
 		result, details, _, lastErr = l.attemptGenerateWithSchemaAndUsage(ctx, prompt, schema, attempt)
 		if lastErr == nil {
 			return result, details, nil
+		}
+
+		// A refusal is deterministic; retrying only buys another billed refusal.
+		if isTerminalError(lastErr) {
+			break
 		}
 
 		l.logger.Warn("Generation attempt with schema failed", "error", lastErr, "attempt", attempt+1)
