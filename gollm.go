@@ -320,8 +320,8 @@ func NewLLM(opts ...ConfigOption) (LLM, error) {
 		opt(cfg)
 	}
 
-	// For openai-responses, reuse the OpenAI API key
-	ensureResponsesAPIKey(cfg)
+	// The OpenAI transport aliases all authenticate with the OpenAI key
+	ensureOpenAIAliasKey(cfg)
 
 	// For local LLM servers (Ollama, LM Studio, vLLM), ensure we have a dummy API key
 	if cfg.Provider == "ollama" || cfg.Provider == "lmstudio" || cfg.Provider == "vllm" {
@@ -386,16 +386,32 @@ func NewLLM(opts ...ConfigOption) (LLM, error) {
 	return llmInstance, nil
 }
 
-// ensureResponsesAPIKey copies the "openai" API key to the "openai-responses"
-// slot when the latter is empty, since both providers share the same key.
-func ensureResponsesAPIKey(cfg *config.Config) {
-	if cfg.Provider != "openai-responses" {
+// openAIAliasProviders are the fork-added provider names that select a specific
+// OpenAI transport — "openai-responses" for /v1/responses, "openai-chat" to pin
+// /v1/chat/completions against the automatic routing in providers/openai_routing.go.
+// All of them authenticate with the same key as plain "openai".
+var openAIAliasProviders = []string{"openai-responses", "openai-chat"}
+
+// ensureOpenAIAliasKey copies the "openai" API key into the configured alias slot
+// when that slot is empty, so selecting a transport does not require duplicating
+// the key. Models routed automatically never reach here: routing happens inside
+// the provider registry and leaves cfg.Provider as "openai", so the key lookup
+// resolves normally.
+func ensureOpenAIAliasKey(cfg *config.Config) {
+	isAlias := false
+	for _, alias := range openAIAliasProviders {
+		if cfg.Provider == alias {
+			isAlias = true
+			break
+		}
+	}
+	if !isAlias {
 		return
 	}
 	if cfg.APIKeys == nil {
 		cfg.APIKeys = make(map[string]string)
 	}
-	if cfg.APIKeys["openai-responses"] == "" && cfg.APIKeys["openai"] != "" {
-		cfg.APIKeys["openai-responses"] = cfg.APIKeys["openai"]
+	if cfg.APIKeys[cfg.Provider] == "" && cfg.APIKeys["openai"] != "" {
+		cfg.APIKeys[cfg.Provider] = cfg.APIKeys["openai"]
 	}
 }

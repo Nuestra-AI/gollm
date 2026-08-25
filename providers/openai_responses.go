@@ -104,9 +104,8 @@ func (p *OpenAIResponsesProvider) SetOption(key string, value interface{}) {
 func (p *OpenAIResponsesProvider) SetDefaultOptions(cfg *config.Config) {
 	p.SetOption("temperature", cfg.Temperature)
 	p.SetOption("max_tokens", cfg.MaxTokens)
-	if cfg.Seed != nil {
-		p.SetOption("seed", *cfg.Seed)
-	}
+	// cfg.Seed is deliberately not forwarded: the Responses API has no seed
+	// parameter and rejects the request outright. See responsesExcludeKeys.
 }
 
 // ---------------------------------------------------------------------------
@@ -118,6 +117,13 @@ func (p *OpenAIResponsesProvider) SetDefaultOptions(cfg *config.Config) {
 var responsesExcludeKeys = []string{
 	"tools", "tool_choice", "strict_tools", "system_prompt",
 	"structured_messages", "images", "stream",
+
+	// Chat Completions parameters the Responses API rejects outright. Option
+	// merging is a denylist — anything not named here is copied into the request
+	// body verbatim — so a caller carrying these over from the Chat Completions
+	// path would get "Unknown parameter: 'seed'" (400) rather than a silently
+	// ignored field. Verified 2026-08-25.
+	"seed", "stop",
 }
 
 // buildTools converts utils.Tool slice into the Responses API tools format.
@@ -219,6 +225,113 @@ func (p *OpenAIResponsesProvider) addToolsToRequest(request map[string]interface
 }
 
 // ---------------------------------------------------------------------------
+// Content parts
+//
+// The Responses API uses different content shapes from Chat Completions: images
+// are {"type":"input_image","image_url":"<url>"} with image_url a plain string,
+// not {"type":"image_url","image_url":{"url":…}}; text is "input_text" on input
+// roles and "output_text" on assistant turns, not "text". The shared helpers in
+// vision_helpers.go emit the Chat Completions shapes and are used by
+// OpenAIProvider, so this API needs its own converters rather than reuse.
+// ---------------------------------------------------------------------------
+
+// responsesImagePart converts one image ContentPart to the Responses shape.
+func responsesImagePart(part types.ContentPart) (map[string]interface{}, bool) {
+	switch part.Type {
+	case types.ContentTypeImageURL:
+		if part.ImageURL == nil || part.ImageURL.URL == "" {
+			return nil, false
+		}
+		img := map[string]interface{}{
+			"type":      "input_image",
+			"image_url": part.ImageURL.URL,
+		}
+		if part.ImageURL.Detail != "" {
+			img["detail"] = part.ImageURL.Detail
+		}
+		return img, true
+
+	case types.ContentTypeImage:
+		if part.Source == nil || part.Source.Data == "" {
+			return nil, false
+		}
+		return map[string]interface{}{
+			"type":      "input_image",
+			"image_url": fmt.Sprintf("data:%s;base64,%s", part.Source.MediaType, part.Source.Data),
+		}, true
+	}
+	return nil, false
+}
+
+// responsesImagesContent converts a slice of images to Responses content parts.
+func responsesImagesContent(images []types.ContentPart) []map[string]interface{} {
+	content := make([]map[string]interface{}, 0, len(images))
+	for _, img := range images {
+		if converted, ok := responsesImagePart(img); ok {
+			content = append(content, converted)
+		}
+	}
+	return content
+}
+
+// responsesTextType returns the text content type for a message role. Assistant
+// turns replayed as input carry "output_text"; every other role uses "input_text".
+func responsesTextType(role string) string {
+	if role == "assistant" {
+		return "output_text"
+	}
+	return "input_text"
+}
+
+// buildResponsesContent converts mixed text/image parts for the given role.
+func buildResponsesContent(parts []types.ContentPart, role string) []map[string]interface{} {
+	content := make([]map[string]interface{}, 0, len(parts))
+	for _, part := range parts {
+		if part.Type == types.ContentTypeText {
+			content = append(content, map[string]interface{}{
+				"type": responsesTextType(role),
+				"text": part.Text,
+			})
+			continue
+		}
+		if converted, ok := responsesImagePart(part); ok {
+			content = append(content, converted)
+		}
+	}
+	return content
+}
+
+// buildResponsesInput renders a prompt plus optional images as a Responses input
+// value: a bare string when there are no images, a single user message otherwise.
+func buildResponsesInput(prompt string, options map[string]interface{}) interface{} {
+	images, ok := options["images"].([]types.ContentPart)
+	if !ok || len(images) == 0 {
+		return prompt
+	}
+	content := []map[string]interface{}{{"type": "input_text", "text": prompt}}
+	content = append(content, responsesImagesContent(images)...)
+	return []map[string]interface{}{{"role": "user", "content": content}}
+}
+
+// warnDroppedChatOnlyParams logs the Chat Completions parameters this API has no
+// equivalent for. They are stripped rather than forwarded (see
+// responsesExcludeKeys); without this the loss is silent, which matters most for
+// callers who configured plain "openai" and were routed here automatically.
+func (p *OpenAIResponsesProvider) warnDroppedChatOnlyParams(options map[string]interface{}) {
+	if p.logger == nil {
+		return
+	}
+	for _, key := range []string{"seed", "stop"} {
+		_, inRequest := options[key]
+		_, inProvider := p.options[key]
+		if inRequest || inProvider {
+			p.logger.Warn("Parameter is not supported by the OpenAI Responses API and was dropped",
+				"parameter", key, "model", p.model)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
 // PrepareRequest — simple prompt → Responses API format
 // ---------------------------------------------------------------------------
 
@@ -232,22 +345,10 @@ func (p *OpenAIResponsesProvider) PrepareRequest(prompt string, options map[stri
 		request["instructions"] = systemPrompt
 	}
 
-	// Check for images
-	images, hasImages := options["images"].([]types.ContentPart)
-	if hasImages && len(images) > 0 {
-		content := []map[string]interface{}{
-			{"type": "input_text", "text": prompt},
-		}
-		// ConvertImagesToOpenAIContent is defined in vision_helpers.go
-		content = append(content, ConvertImagesToOpenAIContent(images)...)
-		request["input"] = []map[string]interface{}{
-			{"role": "user", "content": content},
-		}
-	} else {
-		request["input"] = prompt
-	}
+	request["input"] = buildResponsesInput(prompt, options)
 
 	// Tools
+	p.warnDroppedChatOnlyParams(options)
 	p.addToolsToRequest(request, options)
 
 	// Merge options
@@ -275,7 +376,7 @@ func (p *OpenAIResponsesProvider) PrepareRequestWithSchema(prompt string, option
 
 	request := map[string]interface{}{
 		"model": p.model,
-		"input": prompt,
+		"input": buildResponsesInput(prompt, options),
 		"text": map[string]interface{}{
 			"format": map[string]interface{}{
 				"type":   "json_schema",
@@ -414,8 +515,7 @@ func (p *OpenAIResponsesProvider) convertMessagesToInput(messages []types.Memory
 
 		// Multimodal content
 		if msg.HasMultiContent() {
-			// BuildOpenAIContentFromParts is defined in vision_helpers.go
-			item["content"] = BuildOpenAIContentFromParts(msg.MultiContent)
+			item["content"] = buildResponsesContent(msg.MultiContent, msg.Role)
 		} else {
 			item["content"] = msg.Content
 		}
@@ -767,26 +867,17 @@ func parseResponsesWebSearchOutput(output []interface{}, details *types.Response
 // ---------------------------------------------------------------------------
 
 func (p *OpenAIResponsesProvider) PrepareStreamRequest(prompt string, options map[string]interface{}) ([]byte, error) {
-	// Build a normal request, then add stream: true
-	request := map[string]interface{}{
-		"model":  p.model,
-		"input":  prompt,
-		"stream": true,
+	// Built from PrepareRequest rather than assembled separately: a second copy of
+	// the body-building logic silently dropped images once already.
+	body, err := p.PrepareRequest(prompt, options)
+	if err != nil {
+		return nil, err
 	}
-
-	if systemPrompt, ok := options["system_prompt"].(string); ok && systemPrompt != "" {
-		request["instructions"] = systemPrompt
+	var request map[string]interface{}
+	if err := json.Unmarshal(body, &request); err != nil {
+		return nil, err
 	}
-
-	p.addToolsToRequest(request, options)
-
-	merged := mergeOpenAIResponsesOptions(p.model, p.options, options, responsesExcludeKeys)
-	for k, v := range merged {
-		request[k] = v
-	}
-	applyResponsesVerbosity(request)
-	applyResponsesReasoning(request)
-
+	request["stream"] = true
 	return json.Marshal(request)
 }
 
