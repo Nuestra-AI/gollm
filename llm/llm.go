@@ -487,8 +487,10 @@ func (l *LLMImpl) GenerateWithSchema(ctx context.Context, prompt *Prompt, schema
 		}
 
 		// A refusal is deterministic; retrying only buys another billed refusal.
+		// Returned rather than broken out of, so the error reports the refusal
+		// instead of an attempt count that never happened.
 		if isTerminalError(lastErr) {
-			break
+			return "", lastErr
 		}
 
 		l.logger.Warn("Generation attempt with schema failed", "error", lastErr, "attempt", attempt+1)
@@ -540,8 +542,10 @@ func (l *LLMImpl) GenerateWithUsage(ctx context.Context, prompt *Prompt, opts ..
 		}
 
 		// A refusal is deterministic; retrying only buys another billed refusal.
+		// Returned rather than broken out of, so the error reports the refusal
+		// instead of an attempt count that never happened.
 		if isTerminalError(lastErr) {
-			break
+			return "", nil, lastErr
 		}
 
 		l.logger.Warn("Generation attempt failed", "error", lastErr, "attempt", attempt+1)
@@ -585,8 +589,10 @@ func (l *LLMImpl) GenerateWithSchemaAndUsage(ctx context.Context, prompt *Prompt
 		}
 
 		// A refusal is deterministic; retrying only buys another billed refusal.
+		// Returned rather than broken out of, so the error reports the refusal
+		// instead of an attempt count that never happened.
 		if isTerminalError(lastErr) {
-			break
+			return "", nil, lastErr
 		}
 
 		l.logger.Warn("Generation attempt with schema failed", "error", lastErr, "attempt", attempt+1)
