@@ -87,12 +87,11 @@ func (p *OpenRouterProvider) SetOption(key string, value interface{}) {
 }
 
 // SetDefaultOptions configures standard options from the global configuration.
+//
+// Forwards the sampling parameters OpenRouter accepts — the widest set here, min_p
+// and top_k included; its repeat penalty is repetition_penalty.
 func (p *OpenRouterProvider) SetDefaultOptions(config *config.Config) {
-	p.SetOption("temperature", config.Temperature)
-	p.SetOption("max_tokens", config.MaxTokens)
-	if config.Seed != nil {
-		p.SetOption("seed", *config.Seed)
-	}
+	applySamplingDefaults(p, config, openRouterSamplingParams)
 
 	// OpenRouter-specific defaults
 	// Reasoning transforms are enabled via options rather than config
@@ -226,6 +225,8 @@ func (p *OpenRouterProvider) PrepareRequest(prompt string, options map[string]in
 	// stream_usage is a gollm control key (see streamIncludeUsage); never wire it.
 	delete(req, "stream_usage")
 
+	stripUnsupportedSampling(req, openRouterSupportedParams, "openrouter", p.logger)
+
 	return json.Marshal(req)
 }
 
@@ -277,6 +278,8 @@ func (p *OpenRouterProvider) PrepareCompletionRequest(prompt string, options map
 	if stream, ok := req["stream"].(bool); ok && stream {
 		req["stream"] = true
 	}
+
+	stripUnsupportedSampling(req, openRouterSupportedParams, "openrouter", p.logger)
 
 	return json.Marshal(req)
 }
@@ -376,6 +379,8 @@ func (p *OpenRouterProvider) PrepareRequestWithSchema(prompt string, options map
 		// OpenRouter handles caching automatically for supported providers
 		delete(req, "enable_prompt_caching")
 	}
+
+	stripUnsupportedSampling(req, openRouterSupportedParams, "openrouter", p.logger)
 
 	return json.Marshal(req)
 }
@@ -1024,6 +1029,8 @@ func (p *OpenRouterProvider) PrepareRequestWithMessages(messages []types.MemoryM
 	if stream, ok := req["stream"].(bool); ok && stream {
 		req["stream"] = true
 	}
+
+	stripUnsupportedSampling(req, openRouterSupportedParams, "openrouter", p.logger)
 
 	return json.Marshal(req)
 }

@@ -65,12 +65,11 @@ func (p *VLLMProvider) SetOption(key string, value interface{}) {
 }
 
 // SetDefaultOptions configures standard options from the global configuration.
+//
+// Forwards the sampling parameters vLLM's OpenAI server accepts, including the top_k,
+// min_p and repetition_penalty extras it adds to the OpenAI shape.
 func (p *VLLMProvider) SetDefaultOptions(config *config.Config) {
-	p.SetOption("temperature", config.Temperature)
-	p.SetOption("max_tokens", config.MaxTokens)
-	if config.Seed != nil {
-		p.SetOption("seed", *config.Seed)
-	}
+	applySamplingDefaults(p, config, vllmSamplingParams)
 	// Use configured endpoint if provided
 	if config.VLLMEndpoint != "" {
 		p.SetEndpoint(config.VLLMEndpoint)
@@ -161,6 +160,8 @@ func (p *VLLMProvider) PrepareRequest(prompt string, options map[string]interfac
 		}
 	}
 
+	stripUnsupportedSampling(request, vllmSupportedParams, "vllm", p.logger)
+
 	return json.Marshal(request)
 }
 
@@ -224,6 +225,8 @@ func (p *VLLMProvider) PrepareRequestWithSchema(prompt string, options map[strin
 			request[k] = v
 		}
 	}
+
+	stripUnsupportedSampling(request, vllmSupportedParams, "vllm", p.logger)
 
 	return json.Marshal(request)
 }
@@ -339,6 +342,8 @@ func (p *VLLMProvider) PrepareStreamRequest(prompt string, options map[string]in
 		}
 	}
 
+	stripUnsupportedSampling(requestBody, vllmSupportedParams, "vllm", p.logger)
+
 	body, err := json.Marshal(requestBody)
 	if err != nil {
 		return nil, err
@@ -425,6 +430,8 @@ func (p *VLLMProvider) PrepareRequestWithMessages(messages []types.MemoryMessage
 			request[k] = v
 		}
 	}
+
+	stripUnsupportedSampling(request, vllmSupportedParams, "vllm", p.logger)
 
 	return json.Marshal(request)
 }

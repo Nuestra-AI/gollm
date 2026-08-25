@@ -145,6 +145,11 @@ type ProviderConfig struct {
 
 	// SupportsStreaming indicates if streaming is supported
 	SupportsStreaming bool
+
+	// samplingParams is the sampling vocabulary this API accepts. Unexported so the
+	// tables stay internal; a config registered from outside this package leaves it
+	// nil and falls back to the set for its Type.
+	samplingParams []paramSpec
 }
 
 // normalizeSchema converts a schema from various input types (string, []byte, struct)
@@ -263,6 +268,7 @@ func NewProviderRegistry(providerNames ...string) *ProviderRegistry {
 			RequiredHeaders:   map[string]string{"Content-Type": "application/json"},
 			SupportsSchema:    true,
 			SupportsStreaming: true,
+			samplingParams:    openAIChatSamplingParams,
 		},
 		"anthropic": {
 			Name:              "anthropic",
@@ -323,6 +329,7 @@ func NewProviderRegistry(providerNames ...string) *ProviderRegistry {
 			RequiredHeaders:   map[string]string{"Content-Type": "application/json"},
 			SupportsSchema:    true,
 			SupportsStreaming: true,
+			samplingParams:    aliyunSamplingParams,
 		},
 		"lmstudio": {
 			Name:              "lmstudio",
@@ -333,6 +340,7 @@ func NewProviderRegistry(providerNames ...string) *ProviderRegistry {
 			RequiredHeaders:   map[string]string{"Content-Type": "application/json"},
 			SupportsSchema:    true,
 			SupportsStreaming: false, // LM Studio streaming works differently
+			samplingParams:    lmStudioSamplingParams,
 		},
 		"openrouter": {
 			Name:              "openrouter",

@@ -136,12 +136,57 @@ func (p *BedrockProvider) SetOption(key string, value interface{}) {
 }
 
 // SetDefaultOptions configures standard options from the global configuration.
+//
+// Forwards the sampling parameters Bedrock accepts, stored under gollm's names and
+// reshaped per model family at request time. See bedrockSamplingFields.
 func (p *BedrockProvider) SetDefaultOptions(config *config.Config) {
-	p.SetOption("temperature", config.Temperature)
-	p.SetOption("max_tokens", config.MaxTokens)
-	if config.Seed != nil {
-		p.SetOption("seed", *config.Seed)
+	applySamplingDefaults(p, config, bedrockSamplingParams)
+}
+
+// bedrockSamplingFields names the InvokeModel body field each model family uses for
+// each sampling value, from the per-provider pages under
+// docs.aws.amazon.com/bedrock/latest/userguide/model-parameters.html (2026-08-25).
+//
+// Nothing is shared because nothing is shared on the wire: Meta Llama has neither
+// top_k nor a stop field, Cohere spells top_p and top_k p and k, Titan uses camelCase
+// inside textGenerationConfig. max_tokens is absent because each builder already
+// resolves it to its own field with that family's default.
+var bedrockSamplingFields = map[string]map[string]string{
+	"anthropic": {"temperature": "temperature", "top_p": "top_p", "top_k": "top_k", "stop": "stop_sequences"},
+	"meta":      {"temperature": "temperature", "top_p": "top_p"},
+	"mistral":   {"temperature": "temperature", "top_p": "top_p", "top_k": "top_k", "stop": "stop"},
+	"cohere":    {"temperature": "temperature", "top_p": "p", "top_k": "k", "stop": "stop_sequences"},
+	"amazon":    {"temperature": "temperature", "top_p": "topP", "stop": "stopSequences"},
+}
+
+// applyBedrockSampling copies the sampling values the family accepts into the body
+// under that family's field names, per-request options winning.
+func (p *BedrockProvider) applyBedrockSampling(target map[string]interface{}, family string, options map[string]interface{}) {
+	for name, wire := range bedrockSamplingFields[family] {
+		if value, ok := bedrockSamplingValue(p.options, name); ok {
+			target[wire] = value
+		}
+		if value, ok := bedrockSamplingValue(options, name); ok {
+			target[wire] = value
+		}
 	}
+}
+
+// bedrockSamplingValue reads one sampling value out of a source map, accepting any of
+// the three spellings a stop list travels under. Bedrock assembles its bodies by hand
+// and so never reaches normalizeStopSequences, which does this for every other
+// provider; without it a stop list stops working on a move to Bedrock.
+func bedrockSamplingValue(source map[string]interface{}, name string) (interface{}, bool) {
+	if name != "stop" {
+		value, ok := source[name]
+		return value, ok
+	}
+	for _, alias := range stopWireNames {
+		if value, ok := source[alias]; ok {
+			return coerceStopValue(value), true
+		}
+	}
+	return nil, false
 }
 
 // getModelFamily returns the model family for request formatting
@@ -209,13 +254,7 @@ func (p *BedrockProvider) prepareAnthropicRequest(prompt string, options map[str
 		request["system"] = systemPrompt
 	}
 
-	// Add temperature if set
-	if temp, ok := p.options["temperature"].(float64); ok {
-		request["temperature"] = temp
-	}
-	if temp, ok := options["temperature"].(float64); ok {
-		request["temperature"] = temp
-	}
+	p.applyBedrockSampling(request, "anthropic", options)
 
 	return json.Marshal(request)
 }
@@ -231,16 +270,11 @@ func (p *BedrockProvider) prepareMetaRequest(prompt string, options map[string]i
 
 	// Meta Llama format
 	request := map[string]interface{}{
-		"prompt":     fmt.Sprintf("[INST] %s [/INST]", prompt),
+		"prompt":      fmt.Sprintf("[INST] %s [/INST]", prompt),
 		"max_gen_len": maxTokens,
 	}
 
-	if temp, ok := p.options["temperature"].(float64); ok {
-		request["temperature"] = temp
-	}
-	if temp, ok := options["temperature"].(float64); ok {
-		request["temperature"] = temp
-	}
+	p.applyBedrockSampling(request, "meta", options)
 
 	return json.Marshal(request)
 }
@@ -259,12 +293,7 @@ func (p *BedrockProvider) prepareMistralRequest(prompt string, options map[strin
 		"max_tokens": maxTokens,
 	}
 
-	if temp, ok := p.options["temperature"].(float64); ok {
-		request["temperature"] = temp
-	}
-	if temp, ok := options["temperature"].(float64); ok {
-		request["temperature"] = temp
-	}
+	p.applyBedrockSampling(request, "mistral", options)
 
 	return json.Marshal(request)
 }
@@ -283,12 +312,7 @@ func (p *BedrockProvider) prepareCohereRequest(prompt string, options map[string
 		"max_tokens": maxTokens,
 	}
 
-	if temp, ok := p.options["temperature"].(float64); ok {
-		request["temperature"] = temp
-	}
-	if temp, ok := options["temperature"].(float64); ok {
-		request["temperature"] = temp
-	}
+	p.applyBedrockSampling(request, "cohere", options)
 
 	return json.Marshal(request)
 }
@@ -299,9 +323,8 @@ func (p *BedrockProvider) prepareGenericRequest(prompt string, options map[strin
 	}
 
 	params := map[string]interface{}{}
-	if temp, ok := p.options["temperature"].(float64); ok {
-		params["temperature"] = temp
-	}
+	// Titan's shape: sampling lives inside textGenerationConfig, in camelCase.
+	p.applyBedrockSampling(params, "amazon", options)
 	if mt, ok := p.options["max_tokens"].(int); ok {
 		params["maxTokenCount"] = mt
 	}
@@ -635,13 +658,7 @@ func (p *BedrockProvider) prepareAnthropicMessagesRequest(messages []types.Memor
 		})
 	}
 
-	// Add temperature if set
-	if temp, ok := p.options["temperature"].(float64); ok {
-		request["temperature"] = temp
-	}
-	if temp, ok := options["temperature"].(float64); ok {
-		request["temperature"] = temp
-	}
+	p.applyBedrockSampling(request, "anthropic", options)
 
 	return json.Marshal(request)
 }

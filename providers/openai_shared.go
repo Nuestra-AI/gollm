@@ -149,6 +149,42 @@ func (u *openAICompatUsage) normalize() *types.TokenUsage {
 // would turn every stream into a 400. Those providers opt in with the "stream_usage" option.
 // Providers already known to accept it — OpenAI and OpenRouter — request it by default in their own
 // PrepareStreamRequest implementations.
+// applySinglePromptMessages fills in the messages array for a one-prompt request and
+// consumes the system_prompt key, which providers otherwise copied to the wire
+// verbatim — where an OpenAI-shaped endpoint ignores or rejects it, so the system
+// prompt never took effect.
+//
+// Reads the merged body, not the per-request options, so a provider-level prompt
+// counts too. A messages array the caller assembled is left alone.
+func applySinglePromptMessages(requestBody map[string]interface{}, prompt, role string) {
+	system, _ := requestBody["system_prompt"].(string)
+	delete(requestBody, "system_prompt")
+
+	if existing, ok := requestBody["messages"]; ok && existing != nil {
+		return
+	}
+
+	messages := make([]map[string]interface{}, 0, 2)
+	if system != "" {
+		messages = append(messages, map[string]interface{}{"role": role, "content": system})
+	}
+	requestBody["messages"] = append(messages, map[string]interface{}{"role": "user", "content": prompt})
+}
+
+// applyAnthropicSystemPrompt is the Messages API counterpart: Anthropic takes the
+// system prompt in a top-level field and accepts only user and assistant roles in
+// messages, so prepending a "system"-role message would be rejected.
+func applyAnthropicSystemPrompt(requestBody map[string]interface{}) {
+	system, _ := requestBody["system_prompt"].(string)
+	delete(requestBody, "system_prompt")
+	if system == "" {
+		return
+	}
+	if _, ok := requestBody["system"]; !ok {
+		requestBody["system"] = system
+	}
+}
+
 func prepareOpenAICompatStreamRequest(body []byte, options map[string]interface{}, defaultInclude bool) ([]byte, error) {
 	var requestBody map[string]interface{}
 	if err := json.Unmarshal(body, &requestBody); err != nil {

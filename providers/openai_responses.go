@@ -103,17 +103,11 @@ func (p *OpenAIResponsesProvider) SetOption(key string, value interface{}) {
 
 // SetDefaultOptions forwards the sampling parameters /v1/responses accepts.
 //
-// Narrower than the Chat Completions set: this API has no seed, frequency_penalty
-// or presence_penalty. Nor the Ollama family (MinP, RepeatPenalty, Mirostat*,
-// TfsZ), which OpenAI takes on neither endpoint.
-//
-// TopP is forwarded only when positive; see the note on OpenAIProvider.
+// Narrower than the Chat Completions set: this API has no seed, frequency_penalty,
+// presence_penalty or stop. Nor the Ollama family (MinP, RepeatPenalty, Mirostat*,
+// TfsZ), which OpenAI takes on neither endpoint. See openAIResponsesSamplingParams.
 func (p *OpenAIResponsesProvider) SetDefaultOptions(cfg *config.Config) {
-	p.SetOption("temperature", cfg.Temperature)
-	p.SetOption("max_tokens", cfg.MaxTokens)
-	if cfg.TopP > 0 {
-		p.SetOption("top_p", cfg.TopP)
-	}
+	applySamplingDefaults(p, cfg, openAIResponsesSamplingParams)
 }
 
 // ---------------------------------------------------------------------------

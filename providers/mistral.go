@@ -62,13 +62,11 @@ func (p *MistralProvider) SetOption(key string, value interface{}) {
 }
 
 // SetDefaultOptions configures standard options from the global configuration.
-// This includes temperature, max tokens, and sampling parameters.
+//
+// Forwards the sampling parameters Mistral accepts, under its names for them —
+// notably random_seed, not seed.
 func (p *MistralProvider) SetDefaultOptions(config *config.Config) {
-	p.SetOption("temperature", config.Temperature)
-	p.SetOption("max_tokens", config.MaxTokens)
-	if config.Seed != nil {
-		p.SetOption("seed", *config.Seed)
-	}
+	applySamplingDefaults(p, config, mistralSamplingParams)
 }
 
 // Name returns "mistral" as the provider identifier.
@@ -123,9 +121,6 @@ func (p *MistralProvider) Headers() map[string]string {
 func (p *MistralProvider) PrepareRequest(prompt string, options map[string]interface{}) ([]byte, error) {
 	requestBody := map[string]interface{}{
 		"model": p.model,
-		"messages": []map[string]interface{}{
-			{"role": "user", "content": prompt},
-		},
 	}
 
 	// First, add the default options
@@ -137,6 +132,10 @@ func (p *MistralProvider) PrepareRequest(prompt string, options map[string]inter
 	for k, v := range options {
 		requestBody[k] = v
 	}
+
+	applySinglePromptMessages(requestBody, prompt, "system")
+
+	stripUnsupportedSampling(requestBody, mistralSupportedParams, "mistral", p.logger)
 
 	return json.Marshal(requestBody)
 }
@@ -160,9 +159,6 @@ func (p *MistralProvider) PrepareRequestWithSchema(prompt string, options map[st
 
 	requestBody := map[string]interface{}{
 		"model": p.model,
-		"messages": []map[string]string{
-			{"role": "user", "content": prompt},
-		},
 		"response_format": map[string]interface{}{
 			"type":   "json_schema",
 			"schema": schemaObj,
@@ -174,10 +170,14 @@ func (p *MistralProvider) PrepareRequestWithSchema(prompt string, options map[st
 		requestBody[k] = v
 	}
 
+	applySinglePromptMessages(requestBody, prompt, "system")
+
 	// Add strict option if provided
 	if strict, ok := options["strict"].(bool); ok && strict {
 		requestBody["response_format"].(map[string]interface{})["strict"] = true
 	}
+
+	stripUnsupportedSampling(requestBody, mistralSupportedParams, "mistral", p.logger)
 
 	return json.Marshal(requestBody)
 }
@@ -429,6 +429,8 @@ func (p *MistralProvider) PrepareRequestWithMessages(messages []types.MemoryMess
 			request[k] = v
 		}
 	}
+
+	stripUnsupportedSampling(request, mistralSupportedParams, "mistral", p.logger)
 
 	return json.Marshal(request)
 }

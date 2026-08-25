@@ -72,14 +72,9 @@ func (p *GroqProvider) SetOption(key string, value interface{}) {
 	p.options[key] = value
 }
 
-// SetDefaultOptions configures standard options from the global configuration.
-// This includes temperature, max tokens, and sampling parameters.
+// SetDefaultOptions forwards the sampling parameters Groq's OpenAI-compatible endpoint accepts.
 func (p *GroqProvider) SetDefaultOptions(config *config.Config) {
-	p.SetOption("temperature", config.Temperature)
-	p.SetOption("max_tokens", config.MaxTokens)
-	if config.Seed != nil {
-		p.SetOption("seed", *config.Seed)
-	}
+	applySamplingDefaults(p, config, groqSamplingParams)
 }
 
 // SupportsJSONSchema indicates whether this provider supports JSON schema validation.
@@ -116,9 +111,6 @@ func (p *GroqProvider) Headers() map[string]string {
 func (p *GroqProvider) PrepareRequest(prompt string, options map[string]interface{}) ([]byte, error) {
 	requestBody := map[string]interface{}{
 		"model": p.model,
-		"messages": []map[string]string{
-			{"role": "user", "content": prompt},
-		},
 	}
 
 	// First, add the default options
@@ -130,6 +122,10 @@ func (p *GroqProvider) PrepareRequest(prompt string, options map[string]interfac
 	for k, v := range options {
 		requestBody[k] = v
 	}
+
+	applySinglePromptMessages(requestBody, prompt, "system")
+
+	stripUnsupportedSampling(requestBody, groqSupportedParams, "groq", p.logger)
 
 	return json.Marshal(requestBody)
 }
@@ -145,9 +141,6 @@ func (p *GroqProvider) PrepareRequestWithSchema(prompt string, options map[strin
 
 	requestBody := map[string]interface{}{
 		"model": p.model,
-		"messages": []map[string]string{
-			{"role": "user", "content": prompt},
-		},
 		"response_format": map[string]interface{}{
 			"type":   "json_schema",
 			"schema": schemaObj,
@@ -159,10 +152,14 @@ func (p *GroqProvider) PrepareRequestWithSchema(prompt string, options map[strin
 		requestBody[k] = v
 	}
 
+	applySinglePromptMessages(requestBody, prompt, "system")
+
 	// Add strict option if provided
 	if strict, ok := options["strict"].(bool); ok && strict {
 		requestBody["response_format"].(map[string]interface{})["strict"] = true
 	}
+
+	stripUnsupportedSampling(requestBody, groqSupportedParams, "groq", p.logger)
 
 	return json.Marshal(requestBody)
 }
@@ -417,6 +414,8 @@ func (p *GroqProvider) PrepareRequestWithMessages(messages []types.MemoryMessage
 			request[k] = v
 		}
 	}
+
+	stripUnsupportedSampling(request, groqSupportedParams, "groq", p.logger)
 
 	return json.Marshal(request)
 }

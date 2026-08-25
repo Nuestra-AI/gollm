@@ -88,24 +88,46 @@ func (p *OllamaProvider) SetOption(key string, value interface{}) {
 }
 
 // SetDefaultOptions configures standard options from the global configuration.
-// This includes temperature and other generation parameters.
+//
+// Forwards the full Ollama runner option set — the widest here, and the one SetMinP,
+// SetRepeatPenalty, SetRepeatLastN and SetMirostat* were written for. Nothing merged
+// p.options into a request before, so none of them reached Ollama at all.
 func (p *OllamaProvider) SetDefaultOptions(config *config.Config) {
-	p.SetOption("temperature", config.Temperature)
-	p.SetOption("num_predict", config.MaxTokens)
-	if config.Seed != nil {
-		p.SetOption("seed", *config.Seed)
-	}
+	applySamplingDefaults(p, config, ollamaSamplingParams)
 	if config.OllamaEndpoint != "" {
 		p.SetEndpoint(config.OllamaEndpoint)
 	}
-	p.SetOption("top_p", config.TopP)
-	p.SetOption("min_p", config.MinP)
-	p.SetOption("repeat_penalty", config.RepeatPenalty)
-	p.SetOption("repeat_last_n", config.RepeatLastN)
-	p.SetOption("mirostat", config.Mirostat)
-	p.SetOption("mirostat_eta", config.MirostatEta)
-	p.SetOption("mirostat_tau", config.MirostatTau)
-	p.SetOption("tfs_z", config.TfsZ)
+}
+
+// nestOllamaOptions moves the runner parameters into the "options" object Ollama
+// reads them from, translating max_tokens to num_predict on the way. A top-level
+// temperature is silently ignored rather than rejected, which is why this was
+// invisible. An "options" map the caller supplied is merged into and wins.
+func (p *OllamaProvider) nestOllamaOptions(requestBody map[string]interface{}) {
+	// max_tokens is gollm's cross-provider name; Ollama's runner calls it num_predict.
+	if maxTokens, ok := requestBody["max_tokens"]; ok {
+		delete(requestBody, "max_tokens")
+		if _, exists := requestBody["num_predict"]; !exists {
+			requestBody["num_predict"] = maxTokens
+		}
+	}
+
+	caller, _ := requestBody["options"].(map[string]interface{})
+	runner := map[string]interface{}{}
+	for key, value := range requestBody {
+		if key == "options" || !ollamaSupportedParams[key] {
+			continue
+		}
+		runner[key] = value
+		delete(requestBody, key)
+	}
+	for key, value := range caller {
+		runner[key] = value
+	}
+
+	if len(runner) > 0 {
+		requestBody["options"] = runner
+	}
 }
 
 // SupportsJSONSchema indicates whether this provider supports JSON schema validation.
@@ -155,11 +177,31 @@ func (p *OllamaProvider) PrepareRequest(prompt string, options map[string]interf
 		delete(options, "images")
 	}
 
+	for k, v := range p.options {
+		requestBody[k] = v
+	}
 	for k, v := range options {
 		requestBody[k] = v
 	}
 
+	applyOllamaSystemPrompt(requestBody)
+	p.nestOllamaOptions(requestBody)
+
 	return json.Marshal(requestBody)
+}
+
+// applyOllamaSystemPrompt moves gollm's system_prompt onto Ollama's own top-level
+// "system" field. The key travelled as a literal system_prompt before, which
+// /api/generate quietly ignores, so the prompt had no effect at all.
+func applyOllamaSystemPrompt(requestBody map[string]interface{}) {
+	prompt, _ := requestBody["system_prompt"].(string)
+	delete(requestBody, "system_prompt")
+	if prompt == "" {
+		return
+	}
+	if _, ok := requestBody["system"]; !ok {
+		requestBody["system"] = prompt
+	}
 }
 
 // PrepareRequestWithSchema creates a request with JSON schema validation.
@@ -413,8 +455,14 @@ func (p *OllamaProvider) PrepareRequestWithMessages(messages []types.MemoryMessa
 	// Collect any images from messages
 	var allImages []string
 
-	// Add system prompt if present
-	if systemPrompt, ok := options["system_prompt"].(string); ok && systemPrompt != "" {
+	// Add system prompt if present, provider-level included: this path flattens the
+	// prompt before the p.options merge, so reading only the per-request options
+	// dropped a prompt set with SetOption. Per-request wins.
+	systemPrompt, _ := p.options["system_prompt"].(string)
+	if perRequest, ok := options["system_prompt"].(string); ok && perRequest != "" {
+		systemPrompt = perRequest
+	}
+	if systemPrompt != "" {
 		flattenedPrompt.WriteString("System: ")
 		flattenedPrompt.WriteString(systemPrompt)
 		flattenedPrompt.WriteString("\n\n")
@@ -458,9 +506,17 @@ func (p *OllamaProvider) PrepareRequestWithMessages(messages []types.MemoryMessa
 		requestBody["images"] = allImages
 	}
 
+	for k, v := range p.options {
+		requestBody[k] = v
+	}
 	for k, v := range options {
 		requestBody[k] = v
 	}
+
+	// The system prompt is already flattened into the prompt above, so drop the key
+	// rather than send it twice.
+	delete(requestBody, "system_prompt")
+	p.nestOllamaOptions(requestBody)
 
 	return json.Marshal(requestBody)
 }

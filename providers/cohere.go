@@ -13,17 +13,15 @@ import (
 
 // cohereSupportedParams defines the parameters accepted by Cohere v2 API.
 // Used to filter out unsupported parameters before sending requests.
-var cohereSupportedParams = map[string]bool{
-	"temperature":       true,
-	"max_tokens":        true,
-	"seed":              true,
-	"frequency_penalty": true,
-	"presence_penalty":  true,
-	"k":                 true,
-	"p":                 true,
-	"stream":            true,
-	"response_format":   true,
-}
+//
+// The sampling half is cohereSamplingParams; stream and response_format are request
+// controls rather than sampling.
+var cohereSupportedParams = func() map[string]bool {
+	params := supportedSampling(cohereSamplingParams)
+	params["stream"] = true
+	params["response_format"] = true
+	return params
+}()
 
 // CohereProvider implements the Provider interface for Cohere's API.
 // It supports Cohere's language models and provides access to their capabilities,
@@ -88,14 +86,12 @@ func (p *CohereProvider) SetOption(key string, value any) {
 }
 
 // SetDefaultOptions configures standard options from the global configuration.
-// This includes temperature, max tokens, and sampling parameters.
+//
+// Forwards the sampling parameters Cohere's v2 chat API accepts, under its names
+// for them: top-k is k and top-p is p.
 func (p *CohereProvider) SetDefaultOptions(config *config.Config) {
-	p.SetOption("temperature", config.Temperature)
-	p.SetOption("max_tokens", config.MaxTokens)
+	applySamplingDefaults(p, config, cohereSamplingParams)
 	p.SetOption("stream", false)
-	if config.Seed != nil {
-		p.SetOption("seed", *config.Seed)
-	}
 }
 
 // Name returns "cohere" as the provider identifier.
@@ -154,15 +150,7 @@ func (p *CohereProvider) Headers() map[string]string {
 //   - Serialized JSON request body
 //   - Any error encountered during preparation
 func (p *CohereProvider) PrepareRequest(prompt string, options map[string]any) ([]byte, error) {
-	requestBody := map[string]any{
-		"model": p.model,
-		"messages": []map[string]any{
-			{
-				"role":    "user",
-				"content": prompt, // Cohere v2 API accepts string content
-			},
-		},
-	}
+	requestBody := map[string]any{"model": p.model}
 
 	// Filter to only Cohere v2 API supported parameters
 	for k, v := range p.options {
@@ -175,6 +163,15 @@ func (p *CohereProvider) PrepareRequest(prompt string, options map[string]any) (
 			requestBody[k] = v
 		}
 	}
+
+	// system_prompt is not a Cohere parameter, so the allowlist above drops it; carry
+	// it across by hand before it becomes the leading system message.
+	for _, source := range []map[string]any{p.options, options} {
+		if systemPrompt, ok := source["system_prompt"].(string); ok && systemPrompt != "" {
+			requestBody["system_prompt"] = systemPrompt
+		}
+	}
+	applySinglePromptMessages(requestBody, prompt, "system")
 
 	return json.Marshal(requestBody)
 }

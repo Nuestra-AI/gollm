@@ -89,13 +89,9 @@ func (p *LambdaProvider) SetOption(key string, value interface{}) {
 	p.logger.Debug("Option set", "key", key, "value", value)
 }
 
-// SetDefaultOptions configures standard options from the global configuration.
+// SetDefaultOptions forwards the sampling parameters Lambda's OpenAI-compatible endpoint accepts.
 func (p *LambdaProvider) SetDefaultOptions(config *config.Config) {
-	p.SetOption("temperature", config.Temperature)
-	p.SetOption("max_tokens", config.MaxTokens)
-	if config.Seed != nil {
-		p.SetOption("seed", *config.Seed)
-	}
+	applySamplingDefaults(p, config, lambdaSamplingParams)
 }
 
 // PrepareRequest creates the request body for a Lambda Labs API call.
@@ -132,6 +128,8 @@ func (p *LambdaProvider) PrepareRequest(prompt string, options map[string]interf
 			request[k] = v
 		}
 	}
+
+	stripUnsupportedSampling(request, lambdaSupportedParams, "lambda", p.logger)
 
 	return json.Marshal(request)
 }
@@ -176,6 +174,8 @@ func (p *LambdaProvider) PrepareRequestWithSchema(prompt string, options map[str
 			request[k] = v
 		}
 	}
+
+	stripUnsupportedSampling(request, lambdaSupportedParams, "lambda", p.logger)
 
 	return json.Marshal(request)
 }
@@ -356,6 +356,8 @@ func (p *LambdaProvider) PrepareRequestWithMessages(messages []types.MemoryMessa
 			request[k] = v
 		}
 	}
+
+	stripUnsupportedSampling(request, lambdaSupportedParams, "lambda", p.logger)
 
 	return json.Marshal(request)
 }

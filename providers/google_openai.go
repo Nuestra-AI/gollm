@@ -34,6 +34,8 @@ func NewGoogleProvider(apiKey, model string, extraHeaders map[string]string) Pro
 	// Gemini maps a "system"-role message to system_instruction and doesn't
 	// recognize OpenAI's "developer" role.
 	provider.systemRole = "system"
+	provider.samplingParams = googleSupportedParams
+	provider.samplingScope = "google-openai"
 
 	return provider
 }
@@ -49,12 +51,12 @@ func (p *GoogleProvider) Endpoint() string {
 }
 
 // SetDefaultOptions configures standard options from the global configuration.
+//
+// Forwards the OpenAI-shaped sampling parameters the compatibility endpoint emulates;
+// Gemini's own top_k and seed have no documented mapping here. Thinking is configured
+// separately, through reasoning_effort and extra_body.
 func (p *GoogleProvider) SetDefaultOptions(config *config.Config) {
-	p.SetOption("temperature", config.Temperature)
-	p.SetOption("max_tokens", config.MaxTokens)
-	if config.Seed != nil {
-		p.SetOption("seed", *config.Seed)
-	}
+	applySamplingDefaults(p, config, googleSamplingParams)
 	p.logger.Debug("Default options set", "temperature", config.Temperature, "max_tokens", config.MaxTokens)
 }
 
