@@ -189,6 +189,10 @@ type ProviderRegistry struct {
 	providers map[string]ProviderConstructor
 	configs   map[string]ProviderConfig
 	mutex     sync.RWMutex
+
+	// customized records names a caller replaced via Register, so automatic OpenAI
+	// transport routing never swaps an override for a built-in provider.
+	customized map[string]bool
 }
 
 // NewProviderRegistry creates a new provider registry with the specified providers.
@@ -235,6 +239,7 @@ func NewProviderRegistry(providerNames ...string) *ProviderRegistry {
 		"bedrock":          NewBedrockProvider,
 		"vllm":             NewVLLMProvider,
 		"openai-responses": NewOpenAIResponsesProvider,
+		"openai-chat":      NewOpenAIProvider,
 	}
 
 	// Standard provider configurations
@@ -379,6 +384,18 @@ func NewProviderRegistry(providerNames ...string) *ProviderRegistry {
 			SupportsSchema:    true,
 			SupportsStreaming: true,
 		},
+		// openai-chat opts out of automatic Responses routing; otherwise
+		// identical to "openai".
+		"openai-chat": {
+			Name:              "openai-chat",
+			Type:              TypeOpenAI,
+			Endpoint:          "https://api.openai.com/v1/chat/completions",
+			AuthHeader:        "Authorization",
+			AuthPrefix:        "Bearer ",
+			RequiredHeaders:   map[string]string{"Content-Type": "application/json"},
+			SupportsSchema:    true,
+			SupportsStreaming: true,
+		},
 	}
 
 	// Store standard configs
@@ -446,6 +463,11 @@ func RegisterGenericProvider(name string, config ProviderConfig) {
 	registry.providers[name] = func(apiKey, model string, extraHeaders map[string]string) Provider {
 		return NewGenericProvider(apiKey, model, name, extraHeaders)
 	}
+	// Caller-supplied like Register, so transport routing must not replace it.
+	if registry.customized == nil {
+		registry.customized = make(map[string]bool)
+	}
+	registry.customized[name] = true
 	registry.mutex.Unlock()
 }
 
@@ -459,6 +481,10 @@ func (pr *ProviderRegistry) Register(name string, constructor ProviderConstructo
 	pr.mutex.Lock()
 	defer pr.mutex.Unlock()
 	pr.providers[name] = constructor
+	if pr.customized == nil {
+		pr.customized = make(map[string]bool)
+	}
+	pr.customized[name] = true
 }
 
 // Get retrieves a provider instance by name.
@@ -479,6 +505,15 @@ func (pr *ProviderRegistry) Register(name string, constructor ProviderConstructo
 //	provider, err := registry.Get("openai", "sk-...", "gpt-4", nil)
 func (pr *ProviderRegistry) Get(name, apiKey, model string, extraHeaders map[string]string) (Provider, error) {
 	pr.mutex.RLock()
+	// Some OpenAI models are served only by /v1/responses; see openai_routing.go.
+	// Skipped for a caller's own constructor, and falls back when the routed
+	// transport is absent (a subset registry has no "openai-responses"), so routing
+	// can never turn a resolvable provider into an unknown-provider error.
+	if routed := routeOpenAIProvider(name, model); routed != name && !pr.customized[name] {
+		if _, ok := pr.providers[routed]; ok {
+			name = routed
+		}
+	}
 	constructor, exists := pr.providers[name]
 	pr.mutex.RUnlock()
 

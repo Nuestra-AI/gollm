@@ -101,11 +101,18 @@ func (p *OpenAIResponsesProvider) SetOption(key string, value interface{}) {
 	p.options[key] = value
 }
 
+// SetDefaultOptions forwards the sampling parameters /v1/responses accepts.
+//
+// Narrower than the Chat Completions set: this API has no seed, frequency_penalty
+// or presence_penalty. Nor the Ollama family (MinP, RepeatPenalty, Mirostat*,
+// TfsZ), which OpenAI takes on neither endpoint.
+//
+// TopP is forwarded only when positive; see the note on OpenAIProvider.
 func (p *OpenAIResponsesProvider) SetDefaultOptions(cfg *config.Config) {
 	p.SetOption("temperature", cfg.Temperature)
 	p.SetOption("max_tokens", cfg.MaxTokens)
-	if cfg.Seed != nil {
-		p.SetOption("seed", *cfg.Seed)
+	if cfg.TopP > 0 {
+		p.SetOption("top_p", cfg.TopP)
 	}
 }
 
@@ -219,6 +226,102 @@ func (p *OpenAIResponsesProvider) addToolsToRequest(request map[string]interface
 }
 
 // ---------------------------------------------------------------------------
+// Content parts. This API takes input_image with a plain-string image_url, and
+// input_text/output_text rather than text. The vision_helpers.go builders emit
+// the Chat Completions shapes and are shared with OpenAIProvider, so the
+// conversions below cannot reuse them.
+// ---------------------------------------------------------------------------
+
+// responsesImagePart converts one image ContentPart to the Responses shape.
+func responsesImagePart(part types.ContentPart) (map[string]interface{}, bool) {
+	switch part.Type {
+	case types.ContentTypeImageURL:
+		if part.ImageURL == nil || part.ImageURL.URL == "" {
+			return nil, false
+		}
+		img := map[string]interface{}{
+			"type":      "input_image",
+			"image_url": part.ImageURL.URL,
+		}
+		if part.ImageURL.Detail != "" {
+			img["detail"] = part.ImageURL.Detail
+		}
+		return img, true
+
+	case types.ContentTypeImage:
+		if part.Source == nil || part.Source.Data == "" {
+			return nil, false
+		}
+		return map[string]interface{}{
+			"type":      "input_image",
+			"image_url": fmt.Sprintf("data:%s;base64,%s", part.Source.MediaType, part.Source.Data),
+		}, true
+	}
+	return nil, false
+}
+
+// responsesImagesContent converts a slice of images to Responses content parts.
+func responsesImagesContent(images []types.ContentPart) []map[string]interface{} {
+	content := make([]map[string]interface{}, 0, len(images))
+	for _, img := range images {
+		if converted, ok := responsesImagePart(img); ok {
+			content = append(content, converted)
+		}
+	}
+	return content
+}
+
+// responsesTextType returns the text content type for a role: assistant turns
+// replayed as input carry "output_text", everything else "input_text".
+func responsesTextType(role string) string {
+	if role == "assistant" {
+		return "output_text"
+	}
+	return "input_text"
+}
+
+// buildResponsesContent converts mixed text/image parts for the given role.
+func buildResponsesContent(parts []types.ContentPart, role string) []map[string]interface{} {
+	content := make([]map[string]interface{}, 0, len(parts))
+	for _, part := range parts {
+		if part.Type == types.ContentTypeText {
+			content = append(content, map[string]interface{}{
+				"type": responsesTextType(role),
+				"text": part.Text,
+			})
+			continue
+		}
+		if converted, ok := responsesImagePart(part); ok {
+			content = append(content, converted)
+		}
+	}
+	return content
+}
+
+// buildResponsesInput renders a prompt as an input value: a bare string, or a
+// single user message when images are present.
+func buildResponsesInput(prompt string, options map[string]interface{}) interface{} {
+	images, ok := options["images"].([]types.ContentPart)
+	if !ok || len(images) == 0 {
+		return prompt
+	}
+	content := []map[string]interface{}{{"type": "input_text", "text": prompt}}
+	content = append(content, responsesImagesContent(images)...)
+	return []map[string]interface{}{{"role": "user", "content": content}}
+}
+
+// applyResponsesStore disables server-side retention unless the caller opts in.
+//
+// "store" is true when omitted here and retains the response for 30+ days, where
+// Chat Completions retains nothing — so the transport must not decide it. An
+// explicit store still wins, for previous_response_id and background mode.
+func applyResponsesStore(request map[string]interface{}) {
+	if _, ok := request["store"]; !ok {
+		request["store"] = false
+	}
+}
+
+// ---------------------------------------------------------------------------
 // PrepareRequest — simple prompt → Responses API format
 // ---------------------------------------------------------------------------
 
@@ -232,20 +335,7 @@ func (p *OpenAIResponsesProvider) PrepareRequest(prompt string, options map[stri
 		request["instructions"] = systemPrompt
 	}
 
-	// Check for images
-	images, hasImages := options["images"].([]types.ContentPart)
-	if hasImages && len(images) > 0 {
-		content := []map[string]interface{}{
-			{"type": "input_text", "text": prompt},
-		}
-		// ConvertImagesToOpenAIContent is defined in vision_helpers.go
-		content = append(content, ConvertImagesToOpenAIContent(images)...)
-		request["input"] = []map[string]interface{}{
-			{"role": "user", "content": content},
-		}
-	} else {
-		request["input"] = prompt
-	}
+	request["input"] = buildResponsesInput(prompt, options)
 
 	// Tools
 	p.addToolsToRequest(request, options)
@@ -257,6 +347,9 @@ func (p *OpenAIResponsesProvider) PrepareRequest(prompt string, options map[stri
 	}
 	applyResponsesVerbosity(request)
 	applyResponsesReasoning(request)
+	applyResponsesStore(request)
+	translateResponseFormatToText(request)
+	filterToAllowedParams(request, responsesAllowedParams, "/v1/responses", p.logger)
 
 	return json.Marshal(request)
 }
@@ -275,7 +368,7 @@ func (p *OpenAIResponsesProvider) PrepareRequestWithSchema(prompt string, option
 
 	request := map[string]interface{}{
 		"model": p.model,
-		"input": prompt,
+		"input": buildResponsesInput(prompt, options),
 		"text": map[string]interface{}{
 			"format": map[string]interface{}{
 				"type":   "json_schema",
@@ -298,6 +391,9 @@ func (p *OpenAIResponsesProvider) PrepareRequestWithSchema(prompt string, option
 	}
 	applyResponsesVerbosity(request)
 	applyResponsesReasoning(request)
+	applyResponsesStore(request)
+	translateResponseFormatToText(request)
+	filterToAllowedParams(request, responsesAllowedParams, "/v1/responses", p.logger)
 
 	return json.Marshal(request)
 }
@@ -326,6 +422,9 @@ func (p *OpenAIResponsesProvider) PrepareRequestWithMessages(messages []types.Me
 	}
 	applyResponsesVerbosity(request)
 	applyResponsesReasoning(request)
+	applyResponsesStore(request)
+	translateResponseFormatToText(request)
+	filterToAllowedParams(request, responsesAllowedParams, "/v1/responses", p.logger)
 
 	return json.Marshal(request)
 }
@@ -369,6 +468,9 @@ func (p *OpenAIResponsesProvider) PrepareRequestWithMessagesAndSchema(messages [
 	}
 	applyResponsesVerbosity(request)
 	applyResponsesReasoning(request)
+	applyResponsesStore(request)
+	translateResponseFormatToText(request)
+	filterToAllowedParams(request, responsesAllowedParams, "/v1/responses", p.logger)
 
 	return json.Marshal(request)
 }
@@ -414,8 +516,7 @@ func (p *OpenAIResponsesProvider) convertMessagesToInput(messages []types.Memory
 
 		// Multimodal content
 		if msg.HasMultiContent() {
-			// BuildOpenAIContentFromParts is defined in vision_helpers.go
-			item["content"] = BuildOpenAIContentFromParts(msg.MultiContent)
+			item["content"] = buildResponsesContent(msg.MultiContent, msg.Role)
 		} else {
 			item["content"] = msg.Content
 		}
@@ -767,26 +868,17 @@ func parseResponsesWebSearchOutput(output []interface{}, details *types.Response
 // ---------------------------------------------------------------------------
 
 func (p *OpenAIResponsesProvider) PrepareStreamRequest(prompt string, options map[string]interface{}) ([]byte, error) {
-	// Build a normal request, then add stream: true
-	request := map[string]interface{}{
-		"model":  p.model,
-		"input":  prompt,
-		"stream": true,
+	// Built from PrepareRequest, not assembled separately: a second copy of this
+	// logic silently dropped images once already.
+	body, err := p.PrepareRequest(prompt, options)
+	if err != nil {
+		return nil, err
 	}
-
-	if systemPrompt, ok := options["system_prompt"].(string); ok && systemPrompt != "" {
-		request["instructions"] = systemPrompt
+	var request map[string]interface{}
+	if err := json.Unmarshal(body, &request); err != nil {
+		return nil, err
 	}
-
-	p.addToolsToRequest(request, options)
-
-	merged := mergeOpenAIResponsesOptions(p.model, p.options, options, responsesExcludeKeys)
-	for k, v := range merged {
-		request[k] = v
-	}
-	applyResponsesVerbosity(request)
-	applyResponsesReasoning(request)
-
+	request["stream"] = true
 	return json.Marshal(request)
 }
 

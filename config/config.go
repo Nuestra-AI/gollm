@@ -96,6 +96,11 @@ type Config struct {
 	// reach of body parsing), request logging, proxies, or custom TLS. When nil a client is built
 	// with the configured Timeout; when set, its own Timeout is respected as-is.
 	HTTPClient *http.Client
+
+	// ToolReasoning selects how requests pairing function tools with reasoning are
+	// served on OpenAI, where the two cannot be combined on Chat Completions from
+	// gpt-5.4 onward. Defaults to ToolReasoningPreferSpeed. See ToolReasoningPolicy.
+	ToolReasoning ToolReasoningPolicy
 }
 
 // LoadConfig creates a new Config instance, loading values from environment
@@ -449,7 +454,6 @@ func SetCustomValidator(fn func(interface{}) error) ConfigOption {
 		c.CustomValidator = fn
 	}
 }
-
 
 // WithOpenAIResponsesAPI switches the provider to "openai-responses" so that
 // requests use the /v1/responses endpoint instead of /v1/chat/completions.

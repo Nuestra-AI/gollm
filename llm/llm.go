@@ -107,6 +107,9 @@ type GenerateConfig struct {
 //   - ErrorTypeProvider if provider initialization fails
 //   - ErrorTypeAuthentication if API key validation fails
 func NewLLM(cfg *config.Config, logger utils.Logger, registry *providers.ProviderRegistry) (LLM, error) {
+	// Both constructors must agree on the transport; see ResolveOpenAITransport.
+	ResolveOpenAITransport(cfg)
+
 	extraHeaders := make(map[string]string)
 	if cfg.Provider == "anthropic" && cfg.EnableCaching {
 		extraHeaders["anthropic-beta"] = "prompt-caching-2024-07-31"
