@@ -463,6 +463,11 @@ func RegisterGenericProvider(name string, config ProviderConfig) {
 	registry.providers[name] = func(apiKey, model string, extraHeaders map[string]string) Provider {
 		return NewGenericProvider(apiKey, model, name, extraHeaders)
 	}
+	// Caller-supplied like Register, so transport routing must not replace it.
+	if registry.customized == nil {
+		registry.customized = make(map[string]bool)
+	}
+	registry.customized[name] = true
 	registry.mutex.Unlock()
 }
 

@@ -587,13 +587,19 @@ func hasOpenAIFunctionTools(options map[string]interface{}) bool {
 // applyOpenAIToolReasoningCarveOut keeps a tool-carrying request from being rejected
 // by pinning reasoning_effort to "none"; see ModelRejectsToolsOnChatCompletions.
 //
-// The parameter must be sent, not omitted: omitting suffices for gpt-5.4 and 5.5,
-// but the gpt-5.6 line reasons by default and still fails. Every affected model
-// accepts "none".
+// Scope differs by model, because the two failure shapes need different handling:
 //
-// Trading reasoning for latency is the right default — /v1/responses measures
-// several times slower — but it is a real capability loss, so it logs. Callers
-// wanting both should select the Responses transport.
+//   - gpt-5.4 and gpt-5.5 fail only on an explicit reasoning_effort, so with none
+//     supplied there is nothing to fix and the model keeps its default reasoning.
+//     Pinning "none" there would disable reasoning to avoid an error that would
+//     not have occurred.
+//   - The gpt-5.6 line reasons by default and fails regardless, so the parameter
+//     must be sent — omitting it is not equivalent to "none".
+//
+// Every affected model accepts "none". Losing reasoning is a real capability
+// reduction, so it logs whenever it happens, including the gpt-5.6 case where the
+// caller set nothing and the model's default reasoning is what gets turned off.
+// Callers wanting both should select the Responses transport.
 //
 // Runs after applyOpenAIReasoningEffort to override the level it normalized, and
 // takes the raw options because the merged map excludes "tools".
@@ -601,9 +607,20 @@ func applyOpenAIToolReasoningCarveOut(model string, merged, options map[string]i
 	if !ModelRejectsToolsOnChatCompletions(model) || !hasOpenAIFunctionTools(options) {
 		return
 	}
+
 	previous, had := merged["reasoning_effort"]
+	if !had && !modelReasonsByDefaultWithTools(model) {
+		return
+	}
 	merged["reasoning_effort"] = string(types.ReasoningEffortNone)
-	if logger == nil || !had {
+
+	if logger == nil {
+		return
+	}
+	if !had {
+		logger.Warn("Reasoning disabled: this model reasons by default and rejects function tools "+
+			"combined with reasoning on /v1/chat/completions. Use the openai-responses provider "+
+			"to keep reasoning with tools.", "model", model)
 		return
 	}
 	if effort, ok := optionString(previous); ok && effort != string(types.ReasoningEffortNone) {
@@ -611,6 +628,14 @@ func applyOpenAIToolReasoningCarveOut(model string, merged, options map[string]i
 			"on /v1/chat/completions. Use the openai-responses provider to keep reasoning with tools.",
 			"model", model, "requested_reasoning_effort", effort)
 	}
+}
+
+// modelReasonsByDefaultWithTools reports whether a model reasons without being
+// asked, so a tool-carrying request fails even with reasoning_effort omitted. True
+// from gpt-5.6 on; earlier affected models fail only on an explicit level.
+func modelReasonsByDefaultWithTools(model string) bool {
+	minor, ok := gpt5MinorVersion(model)
+	return ok && minor >= 6
 }
 
 // applyOpenAIReasoningEffort normalizes or removes the reasoning_effort entry in a prepared

@@ -72,7 +72,10 @@ func filterToAllowedParams(request map[string]interface{}, allowed map[string]bo
 // accept. Scoped by model like stripUnsupportedReasoningParams. The Responses
 // provider needs no such guard: nothing embeds it.
 func filterToOpenAIChatParams(model string, request map[string]interface{}, logger utils.Logger) {
-	if !isOpenAIFamilyModel(model) {
+	// Unwrapped first: a fine-tune id ("ft:gpt-4o-mini-…") is not gpt- prefixed, so
+	// the raw check would classify OpenAI's own model as someone else's catalogue
+	// and skip the filter entirely.
+	if !isOpenAIFamilyModel(baseModelID(model)) {
 		return
 	}
 	filterToAllowedParams(request, chatAllowedParams, "/v1/chat/completions", logger)

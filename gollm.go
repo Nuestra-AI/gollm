@@ -320,12 +320,9 @@ func NewLLM(opts ...ConfigOption) (LLM, error) {
 		opt(cfg)
 	}
 
-	// Resolve the tool+reasoning policy before the key alias below, so a client it
-	// switches to "openai-responses" still resolves the OpenAI key.
-	applyOpenAIToolReasoningPolicy(cfg)
-
-	// The OpenAI transport aliases all authenticate with the OpenAI key
-	ensureOpenAIAliasKey(cfg)
+	// Runs here as well as inside llm.NewLLM because validation below needs the
+	// resolved transport and its key.
+	llm.ResolveOpenAITransport(cfg)
 
 	// For local LLM servers (Ollama, LM Studio, vLLM), ensure we have a dummy API key
 	if cfg.Provider == "ollama" || cfg.Provider == "lmstudio" || cfg.Provider == "vllm" {
@@ -388,50 +385,4 @@ func NewLLM(opts ...ConfigOption) (LLM, error) {
 	}
 
 	return llmInstance, nil
-}
-
-// applyOpenAIToolReasoningPolicy moves a client to the Responses transport when the
-// caller asked to keep reasoning on tool-carrying requests, which Chat Completions
-// rejects from gpt-5.4 onward. See config.ToolReasoningPolicy.
-//
-// Resolved at config time rather than in the registry, which sees only a name and
-// a model: rewriting the provider name keeps this constructor and llm.NewLLM in
-// agreement. Applies only to the bare "openai" provider — an explicit transport
-// outranks a policy — and only to affected models, so prefer-quality does not drag
-// gpt-4o onto a slower endpoint.
-func applyOpenAIToolReasoningPolicy(cfg *config.Config) {
-	if cfg.Provider != "openai" || cfg.ToolReasoning != config.ToolReasoningPreferQuality {
-		return
-	}
-	if providers.ModelRejectsToolsOnChatCompletions(cfg.Model) {
-		cfg.Provider = "openai-responses"
-	}
-}
-
-// openAIAliasProviders select a specific OpenAI transport: "openai-responses" for
-// /v1/responses, "openai-chat" to pin /v1/chat/completions against automatic
-// routing. All authenticate with the same key as plain "openai".
-var openAIAliasProviders = []string{"openai-responses", "openai-chat"}
-
-// ensureOpenAIAliasKey copies the "openai" key into the configured alias slot when
-// empty, so selecting a transport does not mean duplicating the key. Automatic
-// routing never reaches here: it happens in the registry and leaves cfg.Provider
-// as "openai".
-func ensureOpenAIAliasKey(cfg *config.Config) {
-	isAlias := false
-	for _, alias := range openAIAliasProviders {
-		if cfg.Provider == alias {
-			isAlias = true
-			break
-		}
-	}
-	if !isAlias {
-		return
-	}
-	if cfg.APIKeys == nil {
-		cfg.APIKeys = make(map[string]string)
-	}
-	if cfg.APIKeys[cfg.Provider] == "" && cfg.APIKeys["openai"] != "" {
-		cfg.APIKeys[cfg.Provider] = cfg.APIKeys["openai"]
-	}
 }
