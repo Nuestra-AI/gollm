@@ -25,6 +25,22 @@ type OpenAIProvider struct {
 	// systemRole is the role for the system prompt message: "developer" for
 	// OpenAI; compat endpoints that reject it (Google, DeepSeek) set "system".
 	systemRole string
+	// samplingParams bounds which sampling parameters reach the wire, and is set only
+	// by the compat endpoints embedding this provider: filterToOpenAIChatParams skips
+	// their models, so nothing else stops a parameter their API rejects.
+	samplingParams map[string]bool
+	// samplingScope labels samplingParams in debug output; method promotion would
+	// otherwise report "openai" from inside an embedding provider.
+	samplingScope string
+}
+
+// applyCompatSamplingLimits drops sampling parameters an embedding compat endpoint
+// does not accept. A no-op on OpenAI itself, which filterToOpenAIChatParams covers.
+func (p *OpenAIProvider) applyCompatSamplingLimits(request map[string]interface{}) {
+	if p.samplingParams == nil {
+		return
+	}
+	stripUnsupportedSampling(request, p.samplingParams, p.samplingScope, p.logger)
 }
 
 // systemMessageRole returns the role to use for the system prompt message,
@@ -200,25 +216,13 @@ func (p *OpenAIProvider) SetOption(key string, value interface{}) {
 
 // SetDefaultOptions configures standard options from the global configuration.
 //
-// Forwards the sampling parameters /v1/chat/completions accepts. MinP, TopK,
-// RepeatPenalty, RepeatLastN, Mirostat, MirostatEta, MirostatTau and TfsZ are
-// deliberately absent: they are Ollama's, and OpenAI takes none of them on either
-// endpoint. SetOption drops the whole sampling family for reasoning models.
-//
-// TopP is forwarded only when positive: the constructors disagree — LoadConfig
-// applies the envDefault of 0.9, NewConfig leaves Go's zero — and top_p 0 is
-// degenerate rather than unset, so a zero is treated as unset.
+// Forwards the sampling parameters /v1/chat/completions accepts; see
+// openAIChatSamplingParams. MinP, TopK, RepeatPenalty, RepeatLastN, Mirostat,
+// MirostatEta, MirostatTau and TfsZ are deliberately absent: OpenAI takes none of
+// them on either endpoint. SetOption drops the whole sampling family for reasoning
+// models.
 func (p *OpenAIProvider) SetDefaultOptions(config *config.Config) {
-	p.SetOption("temperature", config.Temperature)
-	p.SetOption("max_tokens", config.MaxTokens)
-	if config.TopP > 0 {
-		p.SetOption("top_p", config.TopP)
-	}
-	p.SetOption("frequency_penalty", config.FrequencyPenalty)
-	p.SetOption("presence_penalty", config.PresencePenalty)
-	if config.Seed != nil {
-		p.SetOption("seed", *config.Seed)
-	}
+	applySamplingDefaults(p, config, openAIChatSamplingParams)
 	p.logger.Debug("Default options set", "temperature", config.Temperature, "max_tokens", config.MaxTokens, "top_p", config.TopP, "seed", config.Seed)
 }
 
@@ -402,6 +406,8 @@ func (p *OpenAIProvider) PrepareRequest(prompt string, options map[string]interf
 	applyOpenAIToolReasoningCarveOut(p.model, mergedOptions, options, p.logger)
 	// Only parameters this endpoint accepts; see openai_params.go.
 	filterToOpenAIChatParams(p.model, mergedOptions, p.logger)
+	// And, for an embedding compat endpoint, its own sampling set.
+	p.applyCompatSamplingLimits(mergedOptions)
 
 	// Chat Completions takes verbosity at the top level (unlike the Responses API, which
 	// nests it under text), but only GPT-5 reasoning models accept it at all.
@@ -519,6 +525,8 @@ func (p *OpenAIProvider) PrepareRequestWithSchema(prompt string, options map[str
 	applyOpenAIToolReasoningCarveOut(p.model, mergedOptions, options, p.logger)
 	// Only parameters this endpoint accepts; see openai_params.go.
 	filterToOpenAIChatParams(p.model, mergedOptions, p.logger)
+	// And, for an embedding compat endpoint, its own sampling set.
+	p.applyCompatSamplingLimits(mergedOptions)
 
 	// Chat Completions takes verbosity at the top level (unlike the Responses API, which
 	// nests it under text), but only GPT-5 reasoning models accept it at all.
@@ -1315,6 +1323,8 @@ func (p *OpenAIProvider) PrepareRequestWithMessages(messages []types.MemoryMessa
 	applyOpenAIToolReasoningCarveOut(p.model, mergedOptions, options, p.logger)
 	// Only parameters this endpoint accepts; see openai_params.go.
 	filterToOpenAIChatParams(p.model, mergedOptions, p.logger)
+	// And, for an embedding compat endpoint, its own sampling set.
+	p.applyCompatSamplingLimits(mergedOptions)
 
 	// Chat Completions takes verbosity at the top level (unlike the Responses API, which
 	// nests it under text), but only GPT-5 reasoning models accept it at all.
@@ -1480,6 +1490,8 @@ func (p *OpenAIProvider) PrepareRequestWithMessagesAndSchema(messages []types.Me
 	applyOpenAIToolReasoningCarveOut(p.model, mergedOptions, options, p.logger)
 	// Only parameters this endpoint accepts; see openai_params.go.
 	filterToOpenAIChatParams(p.model, mergedOptions, p.logger)
+	// And, for an embedding compat endpoint, its own sampling set.
+	p.applyCompatSamplingLimits(mergedOptions)
 
 	// Chat Completions takes verbosity at the top level (unlike the Responses API, which
 	// nests it under text), but only GPT-5 reasoning models accept it at all.

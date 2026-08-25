@@ -44,7 +44,11 @@ type MemoryOption struct {
 //   - LLM_ENABLE_CACHING: Enable response caching (default: false)
 //   - LLM_ENABLE_STREAMING: Enable streaming responses (default: false)
 //
-// Advanced Parameters:
+// Advanced Parameters. Pointer fields with no envDefault: nil means unset, and a
+// provider forwards one only when set. A default here is indistinguishable from an
+// explicit choice, so every request would carry a setting nobody selected.
+//   - LLM_TOP_K: Top-k sampling cutoff
+//   - LLM_STOP_SEQUENCES: Comma-separated sequences that stop generation
 //   - LLM_MIN_P: Minimum token probability threshold
 //   - LLM_REPEAT_PENALTY: Penalty for repeated tokens
 //   - LLM_REPEAT_LAST_N: Context window for repetition checking
@@ -68,13 +72,15 @@ type Config struct {
 	APIKeys               map[string]string `validate:"required,apikey"`
 	LogLevel              utils.LogLevel    `env:"LLM_LOG_LEVEL" envDefault:"WARN"`
 	Seed                  *int              `env:"LLM_SEED"`
-	MinP                  *float64          `env:"LLM_MIN_P" envDefault:"0.05"`
-	RepeatPenalty         *float64          `env:"LLM_REPEAT_PENALTY" envDefault:"1.1"`
-	RepeatLastN           *int              `env:"LLM_REPEAT_LAST_N" envDefault:"64"`
-	Mirostat              *int              `env:"LLM_MIROSTAT" envDefault:"0"`
-	MirostatEta           *float64          `env:"LLM_MIROSTAT_ETA" envDefault:"0.1"`
-	MirostatTau           *float64          `env:"LLM_MIROSTAT_TAU" envDefault:"5.0"`
-	TfsZ                  *float64          `env:"LLM_TFS_Z" envDefault:"1"`
+	TopK                  *int              `env:"LLM_TOP_K"`
+	StopSequences         []string          `env:"LLM_STOP_SEQUENCES" envSeparator:","`
+	MinP                  *float64          `env:"LLM_MIN_P"`
+	RepeatPenalty         *float64          `env:"LLM_REPEAT_PENALTY"`
+	RepeatLastN           *int              `env:"LLM_REPEAT_LAST_N"`
+	Mirostat              *int              `env:"LLM_MIROSTAT"`
+	MirostatEta           *float64          `env:"LLM_MIROSTAT_ETA"`
+	MirostatTau           *float64          `env:"LLM_MIROSTAT_TAU"`
+	TfsZ                  *float64          `env:"LLM_TFS_Z"`
 	Logger                utils.Logger
 	SystemPrompt          string
 	SystemPromptCacheType string
@@ -364,6 +370,28 @@ func SetPresencePenalty(penalty float64) ConfigOption {
 func SetSeed(seed int) ConfigOption {
 	return func(c *Config) {
 		c.Seed = &seed
+	}
+}
+
+// SetStopSequences sets the sequences that stop generation, under whichever of stop,
+// stop_sequences or stopSequences the target provider uses. Passing none clears it.
+// OpenAI's Responses API has no equivalent and drops them.
+func SetStopSequences(sequences ...string) ConfigOption {
+	return func(c *Config) {
+		if len(sequences) == 0 {
+			c.StopSequences = nil
+			return
+		}
+		c.StopSequences = append([]string(nil), sequences...)
+	}
+}
+
+// SetTopK sets the top-k sampling cutoff. Accepted by Anthropic (through Claude Opus
+// 4.6), OpenRouter, Ollama, vLLM, LM Studio and Aliyun; Cohere spells it "k". OpenAI
+// and Mistral have no equivalent.
+func SetTopK(topK int) ConfigOption {
+	return func(c *Config) {
+		c.TopK = &topK
 	}
 }
 

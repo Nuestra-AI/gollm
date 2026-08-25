@@ -74,13 +74,70 @@ func (p *AnthropicProvider) SetOption(key string, value interface{}) {
 }
 
 // SetDefaultOptions configures standard options from the global configuration.
-// This includes temperature, max tokens, and sampling parameters.
+//
+// Forwards the sampling parameters the Messages API accepts. No seed and no
+// penalties; temperature, top_p and top_k survive to the wire only on models that
+// still accept them (see anthropicAcceptsSamplingParams).
 func (p *AnthropicProvider) SetDefaultOptions(config *config.Config) {
-	p.SetOption("temperature", config.Temperature)
-	p.SetOption("max_tokens", config.MaxTokens)
-	if config.Seed != nil {
-		p.SetOption("seed", *config.Seed)
+	applySamplingDefaults(p, config, anthropicSamplingParams)
+}
+
+// anthropicControlKeys are gollm's own option keys, consumed while assembling the
+// body rather than forwarded to the API. max_tokens is deliberately not one of them:
+// skipping it made a per-request value win on some paths and lose on others.
+var anthropicControlKeys = map[string]bool{
+	"system_prompt": true, "tools": true, "tool_choice": true,
+	"enable_caching": true, "reasoning_effort": true, "strict_tools": true,
+	"images": true, "structured_messages": true,
+}
+
+// mergeAnthropicOptions copies provider defaults then per-request options into an
+// assembled body, and drops the sampling parameters the target model rejects. The
+// defaults pass is what makes SetTemperature and SetTopK reach Anthropic at all.
+func (p *AnthropicProvider) mergeAnthropicOptions(requestBody, options map[string]interface{}) {
+	for k, v := range p.options {
+		if !anthropicControlKeys[k] {
+			requestBody[k] = v
+		}
 	}
+	for k, v := range options {
+		if !anthropicControlKeys[k] {
+			requestBody[k] = v
+		}
+	}
+
+	supported := anthropicRequiredOnly
+	if anthropicAcceptsSamplingParams(p.model) {
+		supported = anthropicSupportedParams
+	}
+	stripUnsupportedSampling(requestBody, supported, "anthropic", p.logger)
+}
+
+// anthropicAcceptsSamplingParams reports whether the model still takes temperature,
+// top_p and top_k. The Messages API reference deprecates all three: models released
+// after Claude Opus 4.6 reject any temperature but 1.0 and any top_p below 0.99 with
+// a 400, and reject top_k outright.
+//
+// Unknown models fall through to "does not accept": a stripped parameter degrades to
+// the model's default, where forwarding one it rejects fails the whole request.
+//
+// Claude 3 numbers before the model name (claude-3-5-haiku-latest) and Claude 4 after
+// it (claude-opus-4-6), so the two need different patterns.
+func anthropicAcceptsSamplingParams(model string) bool {
+	m := strings.ToLower(model)
+	for _, legacy := range []string{
+		// Claude 2, and the whole Claude 3 line: 3, 3.5 and 3.7.
+		"claude-2", "claude-3",
+		// Claude 4 through 4.6, which is where the deprecation starts.
+		"opus-4-0", "opus-4-1", "opus-4-5", "opus-4-6",
+		"sonnet-4-0", "sonnet-4-5", "sonnet-4-6",
+		"haiku-4-5",
+	} {
+		if strings.Contains(m, legacy) {
+			return true
+		}
+	}
+	return false
 }
 
 // Name returns "anthropic" as the provider identifier.
@@ -270,12 +327,7 @@ func (p *AnthropicProvider) PrepareRequest(prompt string, options map[string]int
 
 	requestBody["messages"] = append(requestBody["messages"].([]map[string]interface{}), userMessage)
 
-	// Add other options
-	for k, v := range options {
-		if k != "system_prompt" && k != "max_tokens" && k != "tools" && k != "tool_choice" && k != "enable_caching" && k != "reasoning_effort" && k != "strict_tools" && k != "images" {
-			requestBody[k] = v
-		}
-	}
+	p.mergeAnthropicOptions(requestBody, options)
 
 	// Configure thinking from reasoning_effort (adaptive vs. budgeted by model).
 	// Runs after the passthrough so it sees the final max_tokens and wins over
@@ -295,16 +347,34 @@ func (p *AnthropicProvider) PrepareRequest(prompt string, options map[string]int
 func anthropicUsesLegacyThinking(model string) bool {
 	m := strings.ToLower(model)
 	for _, legacy := range []string{
-		"opus-4-5", "opus-4-1", "opus-4-0", "opus-3",
-		"sonnet-4-5", "sonnet-4-0", "sonnet-3",
-		"haiku-4-5", "haiku-3",
-		"claude-2",
+		"claude-3-7",
+		"opus-4-0", "opus-4-1", "opus-4-5",
+		"sonnet-4-0", "sonnet-4-5",
+		"haiku-4-5",
 	} {
 		if strings.Contains(m, legacy) {
 			return true
 		}
 	}
 	return false
+}
+
+// anthropicSupportsThinking reports whether the model has a thinking mode at all.
+// Extended thinking arrived with Claude 3.7; Claude 3.5 and earlier reject both
+// thinking:{type:"enabled"} and thinking:{type:"adaptive"}. Listing what came before
+// means an unknown model is assumed to think, as every model since 3.7 has.
+func anthropicSupportsThinking(model string) bool {
+	m := strings.ToLower(model)
+	for _, preThinking := range []string{
+		"claude-1", "claude-2", "claude-instant",
+		"claude-3-opus", "claude-3-sonnet", "claude-3-haiku",
+		"claude-3-5-sonnet", "claude-3-5-haiku",
+	} {
+		if strings.Contains(m, preThinking) {
+			return false
+		}
+	}
+	return true
 }
 
 // anthropicSupportsXhighEffort reports whether the model accepts the "xhigh"
@@ -374,6 +444,12 @@ func anthropicThinkingBudget(effort string, maxTokens int) (int, bool) {
 // output_config.effort — never budget_tokens, which they reject. Legacy models
 // get manual extended thinking with an effort-derived budget_tokens instead.
 func (p *AnthropicProvider) applyThinking(requestBody map[string]interface{}, options map[string]interface{}) {
+	// reasoning_effort is a cross-provider hint, so drop it on models that have no
+	// thinking mode rather than fail the request.
+	if !anthropicSupportsThinking(p.model) {
+		return
+	}
+
 	// A per-request reasoning_effort takes precedence over a provider-level
 	// default (set via SetOption), mirroring how the OpenAI provider merges
 	// request options over provider defaults.
@@ -475,12 +551,9 @@ func (p *AnthropicProvider) PrepareRequestWithSchema(prompt string, options map[
 		},
 	}
 
-	// Add any additional options
-	for k, v := range options {
-		if k != "system_prompt" && k != "reasoning_effort" && k != "strict_tools" { // Skip system_prompt as we're using it for schema, skip OpenAI-specific params
-			requestBody[k] = v
-		}
-	}
+	// system_prompt is a control key and is skipped: the schema instruction above
+	// owns the system block here.
+	p.mergeAnthropicOptions(requestBody, options)
 
 	// Configure thinking after the passthrough so budget_tokens can be validated
 	// against the max_tokens the caller supplied via options.
@@ -904,33 +977,19 @@ func (p *AnthropicProvider) PrepareStreamRequest(prompt string, options map[stri
 				"content": prompt,
 			},
 		},
-		"max_tokens": 1024, // Default max tokens
+		"max_tokens": 1024, // Default, replaced below by a configured value
 	}
 
 	// Add system prompt if present
 	if systemPrompt, ok := options["system_prompt"].(string); ok && systemPrompt != "" {
 		requestBody["system"] = systemPrompt
-		delete(options, "system_prompt")
 	}
 
-	// Add max tokens if present
-	if maxTokens, ok := options["max_tokens"].(int); ok {
-		requestBody["max_tokens"] = maxTokens
-		delete(options, "max_tokens")
-	}
-
-	// Add temperature if present
-	if temperature, ok := options["temperature"].(float64); ok {
-		requestBody["temperature"] = temperature
-		delete(options, "temperature")
-	}
-
-	// Add other options
-	for k, v := range options {
-		if k != "stream" && k != "reasoning_effort" && k != "strict_tools" { // Don't override stream setting, skip OpenAI-specific params
-			requestBody[k] = v
-		}
-	}
+	// The same merge every other builder uses. Hand-rolled, this read only max_tokens
+	// and temperature from the per-request options and nothing from the defaults.
+	p.mergeAnthropicOptions(requestBody, options)
+	// Reassert: a stray stream option must not turn off the streaming builder.
+	requestBody["stream"] = true
 
 	// Configure thinking after the passthrough so it sees the final max_tokens
 	// and wins over any raw thinking/output_config option.
@@ -1341,12 +1400,7 @@ func (p *AnthropicProvider) PrepareRequestWithMessages(messages []types.MemoryMe
 		requestBody["messages"] = append(requestBody["messages"].([]map[string]interface{}), message)
 	}
 
-	// Add other options
-	for k, v := range options {
-		if k != "system_prompt" && k != "max_tokens" && k != "tools" && k != "tool_choice" && k != "enable_caching" && k != "structured_messages" && k != "reasoning_effort" && k != "strict_tools" && k != "images" {
-			requestBody[k] = v
-		}
-	}
+	p.mergeAnthropicOptions(requestBody, options)
 
 	// Configure thinking after the passthrough so it sees the final max_tokens
 	// and wins over any raw thinking/output_config option.

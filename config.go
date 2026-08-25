@@ -91,6 +91,8 @@ var (
 	SetSeed             = config.SetSeed             // Sets random seed for reproducible generation
 
 	// Advanced generation parameters
+	SetTopK          = config.SetTopK          // Sets top-k sampling cutoff
+	SetStopSequences = config.SetStopSequences // Sets sequences that stop generation
 	SetMinP          = config.SetMinP          // Sets minimum probability threshold
 	SetRepeatPenalty = config.SetRepeatPenalty // Controls repetition penalty
 	SetRepeatLastN   = config.SetRepeatLastN   // Sets context window for repetition

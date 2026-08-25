@@ -25,6 +25,10 @@ type GenericProvider struct {
 	options       map[string]interface{} // Model-specific options
 	logger        utils.Logger           // Logger instance
 	extraEndpoint string                 // Optional override for endpoint
+	// samplingSupported is the strip-pass lookup, built once rather than per request.
+	// Read it through supportedSamplingParams, never directly: nil means "not built
+	// yet", and a nil lookup would strip every sampling parameter.
+	samplingSupported map[string]bool
 }
 
 // NewGenericProvider creates a new provider instance based on the provided configuration.
@@ -57,7 +61,7 @@ func NewGenericProvider(apiKey, model, providerName string, extraHeaders map[str
 		delete(extraHeaders, "azure_endpoint") // Remove so it's not sent as HTTP header
 	}
 
-	return &GenericProvider{
+	provider := &GenericProvider{
 		apiKey:        apiKey,
 		model:         model,
 		config:        config,
@@ -66,6 +70,8 @@ func NewGenericProvider(apiKey, model, providerName string, extraHeaders map[str
 		logger:        utils.NewLogger(utils.LogLevelInfo),
 		extraEndpoint: customEndpoint,
 	}
+	provider.samplingSupported = supportedSampling(provider.samplingSpecs())
+	return provider
 }
 
 // Name returns the provider's identifier from its configuration.
@@ -224,16 +230,36 @@ func (p *GenericProvider) SupportsJSONSchema() bool {
 }
 
 // SetDefaultOptions configures provider-specific defaults from the global configuration.
+//
+// Forwards whatever the backing API accepts. One struct serves three unrelated
+// endpoints — Azure OpenAI, Aliyun DashScope, LM Studio — which disagree on top_k and
+// repeat_penalty, so each declares its own set on its ProviderConfig.
 func (p *GenericProvider) SetDefaultOptions(config *config.Config) {
-	// Common options
-	p.SetOption("temperature", config.Temperature)
-	p.SetOption("max_tokens", config.MaxTokens)
-
-	if config.Seed != nil {
-		p.SetOption("seed", *config.Seed)
-	}
-
+	applySamplingDefaults(p, config, p.samplingSpecs())
 	p.logger.Debug("Default options set", "temperature", config.Temperature, "max_tokens", config.MaxTokens)
+}
+
+// supportedSamplingParams returns the strip-pass lookup, building it on demand for a
+// provider assembled as a struct literal instead of through NewGenericProvider.
+func (p *GenericProvider) supportedSamplingParams() map[string]bool {
+	if p.samplingSupported == nil {
+		p.samplingSupported = supportedSampling(p.samplingSpecs())
+	}
+	return p.samplingSupported
+}
+
+// samplingSpecs returns the sampling vocabulary for this provider's API, falling
+// back to the set for its wire format when the config declares none.
+func (p *GenericProvider) samplingSpecs() []paramSpec {
+	if p.config.samplingParams != nil {
+		return p.config.samplingParams
+	}
+	switch p.config.Type {
+	case TypeAnthropic, TypeClaude:
+		return anthropicSamplingParams
+	default:
+		return openAIChatSamplingParams
+	}
 }
 
 // SetOption sets a specific option for the provider.
@@ -319,16 +345,8 @@ func (p *GenericProvider) prepareOpenAIRequest(prompt string, options map[string
 	// Set model
 	requestOptions["model"] = p.model
 
-	// Handle messages format
-	if _, ok := requestOptions["messages"]; !ok {
-		// Convert simple prompt to messages format
-		requestOptions["messages"] = []map[string]interface{}{
-			{
-				"role":    "user",
-				"content": prompt,
-			},
-		}
-	}
+	// Fill in the messages array and consume the system prompt.
+	applySinglePromptMessages(requestOptions, prompt, "system")
 
 	// Handle JSON schema if provided
 	if schema != nil {
@@ -349,6 +367,8 @@ func (p *GenericProvider) prepareOpenAIRequest(prompt string, options map[string
 			"name": "output_formatter",
 		}
 	}
+
+	stripUnsupportedSampling(requestOptions, p.supportedSamplingParams(), p.config.Name, p.logger)
 
 	return json.Marshal(requestOptions)
 }
@@ -489,14 +509,11 @@ func (p *GenericProvider) prepareAnthropicRequest(prompt string, options map[str
 	// Set model
 	requestOptions["model"] = p.model
 
-	// Handle messages format
+	// Anthropic takes the system prompt in a top-level field, not as a message.
+	applyAnthropicSystemPrompt(requestOptions)
 	if _, ok := requestOptions["messages"]; !ok {
-		// Convert simple prompt to messages format
 		requestOptions["messages"] = []map[string]interface{}{
-			{
-				"role":    "user",
-				"content": prompt,
-			},
+			{"role": "user", "content": prompt},
 		}
 	}
 
@@ -506,6 +523,8 @@ func (p *GenericProvider) prepareAnthropicRequest(prompt string, options map[str
 	} else {
 		requestOptions["max_tokens"] = 1024 // Default
 	}
+
+	stripUnsupportedSampling(requestOptions, p.supportedSamplingParams(), p.config.Name, p.logger)
 
 	return json.Marshal(requestOptions)
 }
@@ -697,6 +716,9 @@ func (p *GenericProvider) prepareOpenAIRequestWithMessages(messages []types.Memo
 	}
 
 	requestOptions["messages"] = openAIMessages
+	delete(requestOptions, "system_prompt")
+
+	stripUnsupportedSampling(requestOptions, p.supportedSamplingParams(), p.config.Name, p.logger)
 
 	return json.Marshal(requestOptions)
 }
@@ -791,10 +813,8 @@ func (p *GenericProvider) prepareAnthropicRequestWithMessages(messages []types.M
 	// Set model
 	requestOptions["model"] = p.model
 
-	// Set system prompt if provided
-	if systemPrompt, ok := options["system_prompt"].(string); ok && systemPrompt != "" {
-		requestOptions["system"] = systemPrompt
-	}
+	// Reads the merged options, so a provider-level prompt counts.
+	applyAnthropicSystemPrompt(requestOptions)
 
 	// Format messages for Anthropic
 	anthropicMessages := []map[string]interface{}{}
@@ -827,6 +847,8 @@ func (p *GenericProvider) prepareAnthropicRequestWithMessages(messages []types.M
 	} else {
 		requestOptions["max_tokens"] = 1024 // Default
 	}
+
+	stripUnsupportedSampling(requestOptions, p.supportedSamplingParams(), p.config.Name, p.logger)
 
 	return json.Marshal(requestOptions)
 }

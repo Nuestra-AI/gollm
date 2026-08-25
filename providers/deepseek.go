@@ -27,6 +27,8 @@ func NewDeepSeekProvider(apiKey, model string, extraHeaders map[string]string) P
 	}
 	// DeepSeek uses the "system" role, not OpenAI's "developer" role.
 	provider.systemRole = "system"
+	provider.samplingParams = deepSeekSupportedParams
+	provider.samplingScope = "deepseek"
 	// Override the endpoint
 	return provider
 }
@@ -44,15 +46,13 @@ func (p *DeepSeekProvider) Endpoint() string {
 }
 
 // SetDefaultOptions configures standard options from the global configuration.
-// This includes setting options like temperature and max tokens based on the provided config.
+//
+// Forwards only what DeepSeek documents: temperature, max_tokens, top_p. No seed,
+// and its penalties are deprecated and explicitly ignored, so they are not sent.
 //
 // Parameters:
 //   - config: The global configuration containing options to set
 func (p *DeepSeekProvider) SetDefaultOptions(config *config.Config) {
-	p.SetOption("temperature", config.Temperature)
-	p.SetOption("max_tokens", config.MaxTokens)
-	if config.Seed != nil {
-		p.SetOption("seed", *config.Seed)
-	}
+	applySamplingDefaults(p, config, deepSeekSamplingParams)
 	p.logger.Debug("Default options set", "temperature", config.Temperature, "max_tokens", config.MaxTokens)
 }
