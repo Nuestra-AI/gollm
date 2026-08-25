@@ -387,6 +387,8 @@ func (p *OpenAIProvider) PrepareRequest(prompt string, options map[string]interf
 	applyOpenAIReasoningEffort(p.model, mergedOptions)
 	// gpt-5.4+ reject function tools combined with reasoning here; see openai_shared.go.
 	applyOpenAIToolReasoningCarveOut(p.model, mergedOptions, options, p.logger)
+	// Only parameters this endpoint accepts; see openai_params.go.
+	filterToOpenAIChatParams(p.model, mergedOptions, p.logger)
 
 	// Chat Completions takes verbosity at the top level (unlike the Responses API, which
 	// nests it under text), but only GPT-5 reasoning models accept it at all.
@@ -502,6 +504,8 @@ func (p *OpenAIProvider) PrepareRequestWithSchema(prompt string, options map[str
 	applyOpenAIReasoningEffort(p.model, mergedOptions)
 	// gpt-5.4+ reject function tools combined with reasoning here; see openai_shared.go.
 	applyOpenAIToolReasoningCarveOut(p.model, mergedOptions, options, p.logger)
+	// Only parameters this endpoint accepts; see openai_params.go.
+	filterToOpenAIChatParams(p.model, mergedOptions, p.logger)
 
 	// Chat Completions takes verbosity at the top level (unlike the Responses API, which
 	// nests it under text), but only GPT-5 reasoning models accept it at all.
@@ -1290,6 +1294,8 @@ func (p *OpenAIProvider) PrepareRequestWithMessages(messages []types.MemoryMessa
 	applyOpenAIReasoningEffort(p.model, mergedOptions)
 	// gpt-5.4+ reject function tools combined with reasoning here; see openai_shared.go.
 	applyOpenAIToolReasoningCarveOut(p.model, mergedOptions, options, p.logger)
+	// Only parameters this endpoint accepts; see openai_params.go.
+	filterToOpenAIChatParams(p.model, mergedOptions, p.logger)
 
 	// Chat Completions takes verbosity at the top level (unlike the Responses API, which
 	// nests it under text), but only GPT-5 reasoning models accept it at all.
@@ -1453,6 +1459,8 @@ func (p *OpenAIProvider) PrepareRequestWithMessagesAndSchema(messages []types.Me
 	applyOpenAIReasoningEffort(p.model, mergedOptions)
 	// gpt-5.4+ reject function tools combined with reasoning here; see openai_shared.go.
 	applyOpenAIToolReasoningCarveOut(p.model, mergedOptions, options, p.logger)
+	// Only parameters this endpoint accepts; see openai_params.go.
+	filterToOpenAIChatParams(p.model, mergedOptions, p.logger)
 
 	// Chat Completions takes verbosity at the top level (unlike the Responses API, which
 	// nests it under text), but only GPT-5 reasoning models accept it at all.

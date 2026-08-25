@@ -117,13 +117,6 @@ func (p *OpenAIResponsesProvider) SetDefaultOptions(cfg *config.Config) {
 var responsesExcludeKeys = []string{
 	"tools", "tool_choice", "strict_tools", "system_prompt",
 	"structured_messages", "images", "stream",
-
-	// Chat Completions parameters the Responses API rejects outright. Option
-	// merging is a denylist — anything not named here is copied into the request
-	// body verbatim — so a caller carrying these over from the Chat Completions
-	// path would get "Unknown parameter: 'seed'" (400) rather than a silently
-	// ignored field. Verified 2026-08-25.
-	"seed", "stop",
 }
 
 // buildTools converts utils.Tool slice into the Responses API tools format.
@@ -338,24 +331,6 @@ func applyResponsesStore(request map[string]interface{}) {
 	}
 }
 
-// warnDroppedChatOnlyParams logs the Chat Completions parameters this API has no
-// equivalent for. They are stripped rather than forwarded (see
-// responsesExcludeKeys); without this the loss is silent, which matters most for
-// callers who configured plain "openai" and were routed here automatically.
-func (p *OpenAIResponsesProvider) warnDroppedChatOnlyParams(options map[string]interface{}) {
-	if p.logger == nil {
-		return
-	}
-	for _, key := range []string{"seed", "stop"} {
-		_, inRequest := options[key]
-		_, inProvider := p.options[key]
-		if inRequest || inProvider {
-			p.logger.Warn("Parameter is not supported by the OpenAI Responses API and was dropped",
-				"parameter", key, "model", p.model)
-		}
-	}
-}
-
 // ---------------------------------------------------------------------------
 // PrepareRequest — simple prompt → Responses API format
 // ---------------------------------------------------------------------------
@@ -373,7 +348,6 @@ func (p *OpenAIResponsesProvider) PrepareRequest(prompt string, options map[stri
 	request["input"] = buildResponsesInput(prompt, options)
 
 	// Tools
-	p.warnDroppedChatOnlyParams(options)
 	p.addToolsToRequest(request, options)
 
 	// Merge options
@@ -384,6 +358,8 @@ func (p *OpenAIResponsesProvider) PrepareRequest(prompt string, options map[stri
 	applyResponsesVerbosity(request)
 	applyResponsesReasoning(request)
 	applyResponsesStore(request)
+	translateResponseFormatToText(request)
+	filterToAllowedParams(request, responsesAllowedParams, "/v1/responses", p.logger)
 
 	return json.Marshal(request)
 }
@@ -426,6 +402,8 @@ func (p *OpenAIResponsesProvider) PrepareRequestWithSchema(prompt string, option
 	applyResponsesVerbosity(request)
 	applyResponsesReasoning(request)
 	applyResponsesStore(request)
+	translateResponseFormatToText(request)
+	filterToAllowedParams(request, responsesAllowedParams, "/v1/responses", p.logger)
 
 	return json.Marshal(request)
 }
@@ -455,6 +433,8 @@ func (p *OpenAIResponsesProvider) PrepareRequestWithMessages(messages []types.Me
 	applyResponsesVerbosity(request)
 	applyResponsesReasoning(request)
 	applyResponsesStore(request)
+	translateResponseFormatToText(request)
+	filterToAllowedParams(request, responsesAllowedParams, "/v1/responses", p.logger)
 
 	return json.Marshal(request)
 }
@@ -499,6 +479,8 @@ func (p *OpenAIResponsesProvider) PrepareRequestWithMessagesAndSchema(messages [
 	applyResponsesVerbosity(request)
 	applyResponsesReasoning(request)
 	applyResponsesStore(request)
+	translateResponseFormatToText(request)
+	filterToAllowedParams(request, responsesAllowedParams, "/v1/responses", p.logger)
 
 	return json.Marshal(request)
 }
