@@ -350,6 +350,14 @@ func (p *GenericProvider) prepareOpenAIRequest(prompt string, options map[string
 
 	// Handle JSON schema if provided
 	if schema != nil {
+		// Normalize first, as the messages variant does: a schema handed over as a
+		// string or []byte would otherwise be embedded as a quoted string rather than
+		// an object, which the API cannot read as a schema.
+		schemaObj, err := normalizeSchema(schema)
+		if err != nil {
+			return nil, fmt.Errorf("failed to normalize schema: %w", err)
+		}
+
 		// Set response format for JSON
 		requestOptions["response_format"] = map[string]string{
 			"type": "json_object",
@@ -360,7 +368,7 @@ func (p *GenericProvider) prepareOpenAIRequest(prompt string, options map[string
 			{
 				"name":        "output_formatter",
 				"description": "Format the output according to the schema",
-				"parameters":  schema,
+				"parameters":  schemaObj,
 			},
 		}
 		requestOptions["function_call"] = map[string]string{
@@ -537,8 +545,12 @@ func (p *GenericProvider) prepareAnthropicStructuredRequest(prompt string, optio
 		requestOptions[k] = v
 	}
 
-	// Add schema to the prompt
-	schemaBytes, err := json.Marshal(schema)
+	// Add schema to the prompt, normalized for the same reason as above.
+	schemaObj, err := normalizeSchema(schema)
+	if err != nil {
+		return nil, fmt.Errorf("failed to normalize schema: %w", err)
+	}
+	schemaBytes, err := json.Marshal(schemaObj)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal schema: %v", err)
 	}

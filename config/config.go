@@ -29,7 +29,7 @@ type MemoryOption struct {
 //
 // Environment Variables:
 //   - LLM_PROVIDER: LLM provider name (default: "anthropic")
-//   - LLM_MODEL: Model name (default: "claude-3-opus-20240229")
+//   - LLM_MODEL: Model name (default: "claude-haiku-4-5")
 //   - OLLAMA_ENDPOINT: Ollama API endpoint (default: "http://localhost:11434")
 //   - LLM_TEMPERATURE: Generation temperature (default: 0.7)
 //   - LLM_MAX_TOKENS: Maximum tokens to generate (default: 100)
@@ -58,7 +58,7 @@ type MemoryOption struct {
 //   - LLM_TFS_Z: Tail-free sampling parameter
 type Config struct {
 	Provider              string            `env:"LLM_PROVIDER" envDefault:"anthropic" validate:"required"`
-	Model                 string            `env:"LLM_MODEL" envDefault:"claude-3-5-haiku-latest" validate:"required"`
+	Model                 string            `env:"LLM_MODEL" envDefault:"claude-haiku-4-5" validate:"required"`
 	OllamaEndpoint        string            `env:"OLLAMA_ENDPOINT" envDefault:"http://localhost:11434"`
 	VLLMEndpoint          string            `env:"VLLM_ENDPOINT" envDefault:"http://localhost:8000"`
 	Temperature           float64           `env:"LLM_TEMPERATURE" envDefault:"0.7" validate:"gte=0,lte=1"`
@@ -500,7 +500,7 @@ func WithOpenAIResponsesAPI() ConfigOption {
 //	cfg := NewConfig()
 //	ApplyOptions(cfg,
 //	    SetProvider("anthropic"),
-//	    SetModel("claude-3-opus-20240229"),
+//	    SetModel("claude-opus-5"),
 //	    SetTemperature(0.7),
 //	    SetMaxTokens(2000),
 //	    SetLogLevel(LogLevelDebug),
