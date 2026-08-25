@@ -17,15 +17,15 @@ func bodyKeys(t *testing.T, b []byte) map[string]interface{} {
 	return m
 }
 
-// chatOnlyParams are valid on /v1/chat/completions and absent from the Responses
-// schema. Sending one to /v1/responses fails the whole request.
+// chatOnlyParams are valid on Chat Completions and absent from the Responses
+// schema; sending one there fails the whole request.
 var chatOnlyParams = []string{
 	"seed", "stop", "n", "frequency_penalty", "presence_penalty",
 	"logit_bias", "logprobs", "max_tokens", "max_completion_tokens",
 }
 
-// notOpenAIParams are accepted by neither endpoint. gollm exposes setters for them
-// because other providers take them, so they can reach an OpenAI request.
+// notOpenAIParams are accepted by neither endpoint, but gollm has setters for them
+// because other providers do.
 var notOpenAIParams = []string{"top_k", "min_p", "repeat_penalty", "mirostat"}
 
 func kitchenSinkOptions() map[string]interface{} {
@@ -39,8 +39,8 @@ func kitchenSinkOptions() map[string]interface{} {
 	return opts
 }
 
-// TestResponsesRejectsChatOnlyParams pins the allowlist: nothing outside the
-// documented /v1/responses body may be forwarded, however the request was built.
+// TestResponsesRejectsChatOnlyParams: nothing outside the documented /v1/responses
+// body may be forwarded, however the request was built.
 func TestResponsesRejectsChatOnlyParams(t *testing.T) {
 	schema := map[string]interface{}{"type": "object", "properties": map[string]interface{}{}}
 	msgs := []types.MemoryMessage{{Role: "user", Content: "hi"}}
@@ -77,8 +77,8 @@ func TestResponsesRejectsChatOnlyParams(t *testing.T) {
 	}
 }
 
-// TestChatRejectsNonOpenAIParams covers the mirror case: parameters that are not
-// OpenAI's on either endpoint were previously forwarded to Chat Completions.
+// TestChatRejectsNonOpenAIParams: parameters OpenAI takes on neither endpoint were
+// previously forwarded to Chat Completions.
 func TestChatRejectsNonOpenAIParams(t *testing.T) {
 	p := NewOpenAIProvider("sk-t", "gpt-4o", nil)
 	body, err := p.PrepareRequest("hi", kitchenSinkOptions())
@@ -100,9 +100,8 @@ func TestChatRejectsNonOpenAIParams(t *testing.T) {
 	}
 }
 
-// TestChatFilterSkipsNonOpenAICatalogues guards the embedding providers. DeepSeek
-// and Google reuse OpenAIProvider's wire format while serving their own models and
-// parameters, so OpenAI's vocabulary must not be imposed on them.
+// TestChatFilterSkipsNonOpenAICatalogues guards the embedding providers: DeepSeek
+// and Google reuse the wire format with their own parameters.
 func TestChatFilterSkipsNonOpenAICatalogues(t *testing.T) {
 	for _, model := range []string{"gemini-2.5-pro", "deepseek-chat"} {
 		t.Run(model, func(t *testing.T) {
@@ -120,9 +119,8 @@ func TestChatFilterSkipsNonOpenAICatalogues(t *testing.T) {
 	}
 }
 
-// TestResponsesTranslatesResponseFormat verifies structured output survives a
-// transport change: Chat's response_format becomes Responses' text.format rather
-// than being dropped, which would silently downgrade the call to free text.
+// TestResponsesTranslatesResponseFormat: structured output must survive a transport
+// change rather than silently downgrading to free text.
 func TestResponsesTranslatesResponseFormat(t *testing.T) {
 	t.Run("json_object", func(t *testing.T) {
 		p := NewOpenAIResponsesProvider("sk-t", "gpt-5.6-sol", nil)
@@ -191,8 +189,8 @@ func TestResponsesTranslatesResponseFormat(t *testing.T) {
 	})
 }
 
-// TestRefusalsSurfaceAsErrors covers both endpoints. A refusal is a completed call
-// with no completion; previously it parsed as empty and read as success.
+// TestRefusalsSurfaceAsErrors: a refusal is a completed call with no completion,
+// and previously parsed as empty and read as success.
 func TestRefusalsSurfaceAsErrors(t *testing.T) {
 	t.Run("chat", func(t *testing.T) {
 		body := []byte(`{"id":"1","model":"gpt-4o","choices":[{"message":

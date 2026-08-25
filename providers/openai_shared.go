@@ -538,42 +538,24 @@ func pinnedEffortModel(model string) (string, bool) {
 	return "", false
 }
 
-// ModelRejectsToolsOnChatCompletions reports whether a model fails on
-// /v1/chat/completions when function tools are combined with reasoning.
-//
-// This does not drive automatic routing. It is the shared definition of the
-// affected set, consumed by applyOpenAIToolReasoningCarveOut on the Chat
-// Completions path — which keeps those requests working by sending
-// reasoning_effort "none" rather than moving them to a slower transport — and
-// exported so a caller-selected transport policy can consult the same set.
-//
-// This deliberately contradicts the "supported endpoints" table on
-// developers.openai.com, which lists Chat Completions as "Supported" for these
-// models — and it is, for plain text. The moment a request pairs function tools
-// with reasoning, the API returns 400:
+// ModelRejectsToolsOnChatCompletions reports whether a model returns 400 on
+// /v1/chat/completions when function tools are combined with reasoning:
 //
 //	Function tools with reasoning_effort are not supported for gpt-5.6-sol in
 //	/v1/chat/completions. To use function tools, use /v1/responses or set
 //	reasoning_effort to 'none'
 //
-// The bound is GPT-5.4, where the restriction was introduced. Within it the
-// failure comes in two shapes:
+// This contradicts the endpoint table, which lists Chat Completions as supported —
+// and it is, for plain text. gpt-5.4 and gpt-5.5 fail only on an explicit
+// reasoning_effort; the gpt-5.6 line reasons by default and fails without one. A
+// bound, not an id list, so later releases inherit it.
 //
-//   - gpt-5.4 and gpt-5.5 fail when the caller sets reasoning_effort explicitly
-//     alongside tools.
-//   - The GPT-5.6 frontier line (sol, terra, luna) reasons by default, so the
-//     rejection fires even with reasoning_effort omitted entirely.
+// Shared by applyOpenAIToolReasoningCarveOut and the caller-selected transport
+// policy; it does not drive automatic routing.
 //
-// Both shapes are covered by the same carve-out, since it pins the parameter
-// rather than relying on its absence.
-//
-// Expressed as a bound rather than an id list so later releases inherit it.
-//
-// Verified 2026-08-25 from the 400 reproduced across litellm (#33221), LibreChat
-// (#14231, #14355), pipecat (#4043, on gpt-5.4) and ruby_llm (#785). OpenAI has
-// not documented the restriction in the API reference or changelog, so this rule
-// rests on reproduced behavior rather than published spec — re-check before
-// removing it.
+// OpenAI has not documented this. Reproduced 2026-08-25 across litellm (#33221),
+// LibreChat (#14231, #14355), pipecat (#4043) and ruby_llm (#785) — re-check
+// before removing.
 func ModelRejectsToolsOnChatCompletions(model string) bool {
 	minor, isGPT5 := gpt5MinorVersion(model)
 	if !isGPT5 || minor < 4 {
@@ -586,10 +568,9 @@ func ModelRejectsToolsOnChatCompletions(model string) bool {
 	return !hasModelSegment(model, "chat")
 }
 
-// hasOpenAIFunctionTools reports whether a request carries at least one function tool that will
-// actually reach the Chat Completions body. web_search is excluded because the Chat path filters
-// it out before building the body (that API has no built-in tools), so a request carrying only
-// web_search sends no tools at all and is not subject to the restriction below.
+// hasOpenAIFunctionTools reports whether any tool will actually reach the Chat
+// Completions body. web_search is filtered out before the body is built, so a
+// request carrying only that one sends no tools and is not restricted.
 func hasOpenAIFunctionTools(options map[string]interface{}) bool {
 	tools, ok := options["tools"].([]utils.Tool)
 	if !ok {
@@ -603,26 +584,19 @@ func hasOpenAIFunctionTools(options map[string]interface{}) bool {
 	return false
 }
 
-// applyOpenAIToolReasoningCarveOut keeps a tool-carrying Chat Completions request from being
-// rejected, by pinning reasoning_effort to "none" on the models that refuse the combination.
+// applyOpenAIToolReasoningCarveOut keeps a tool-carrying request from being rejected
+// by pinning reasoning_effort to "none"; see ModelRejectsToolsOnChatCompletions.
 //
-// From gpt-5.4 onward, pairing function tools with reasoning on /v1/chat/completions fails:
+// The parameter must be sent, not omitted: omitting suffices for gpt-5.4 and 5.5,
+// but the gpt-5.6 line reasons by default and still fails. Every affected model
+// accepts "none".
 //
-//	Function tools with reasoning_effort are not supported for gpt-5.6-sol in
-//	/v1/chat/completions. To use function tools, use /v1/responses or set
-//	reasoning_effort to 'none'
+// Trading reasoning for latency is the right default — /v1/responses measures
+// several times slower — but it is a real capability loss, so it logs. Callers
+// wanting both should select the Responses transport.
 //
-// The parameter must be *sent* as "none" rather than simply omitted. Omitting works for gpt-5.4
-// and gpt-5.5, but the GPT-5.6 line reasons by default and still fails, so silence is not a
-// carve-out. Every affected model accepts "none" (supportsEffortNone covers gpt-5.1 and later).
-//
-// This trades reasoning quality for the Chat Completions latency profile, which is the right
-// default — /v1/responses measures several times slower — but it is a real reduction in model
-// capability, so it is logged when it fires. Callers who would rather keep reasoning and pay the
-// latency should select the Responses transport explicitly via gollm.WithOpenAIResponsesAPI.
-//
-// Applied after applyOpenAIReasoningEffort so it overrides a level that helper just normalized,
-// and it takes the raw per-call options because the merged map deliberately excludes "tools".
+// Runs after applyOpenAIReasoningEffort to override the level it normalized, and
+// takes the raw options because the merged map excludes "tools".
 func applyOpenAIToolReasoningCarveOut(model string, merged, options map[string]interface{}, logger utils.Logger) {
 	if !ModelRejectsToolsOnChatCompletions(model) || !hasOpenAIFunctionTools(options) {
 		return

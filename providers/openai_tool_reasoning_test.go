@@ -12,10 +12,8 @@ func functionTool(name string) utils.Tool {
 	return utils.Tool{Type: "function", Function: utils.Function{Name: name, Description: "d"}}
 }
 
-// reasoningEffortIn returns the reasoning_effort in a prepared Chat Completions
-// body, and whether the key was present at all. Presence matters: for the GPT-5.6
-// line, omitting the parameter is not equivalent to sending "none", because those
-// models reason by default and still reject tool-carrying requests.
+// reasoningEffortIn returns the body's reasoning_effort and whether it was present
+// at all. Presence matters: for gpt-5.6, omitting is not the same as "none".
 func reasoningEffortIn(t *testing.T, body []byte) (string, bool) {
 	t.Helper()
 	var request map[string]interface{}
@@ -81,8 +79,8 @@ func TestChatToolsCarveOutPinsEffortNone(t *testing.T) {
 	}
 }
 
-// TestChatToolsCarveOutLeavesReasoningAlone covers the cases that must keep their
-// reasoning: no tools, or a model outside the affected set.
+// TestChatToolsCarveOutLeavesReasoningAlone: no tools, or a model outside the
+// affected set, must keep full reasoning.
 func TestChatToolsCarveOutLeavesReasoningAlone(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -133,9 +131,8 @@ func TestChatToolsCarveOutLeavesReasoningAlone(t *testing.T) {
 	}
 }
 
-// TestChatToolsCarveOutCoversEveryRequestPath ensures the carve-out is not wired
-// into one code path and missing from another — a tool-carrying request must be
-// safe however it was built, including the streaming variants.
+// TestChatToolsCarveOutCoversEveryRequestPath: a tool-carrying request must be safe
+// however it was built, so the carve-out cannot be wired into only some paths.
 func TestChatToolsCarveOutCoversEveryRequestPath(t *testing.T) {
 	opts := map[string]interface{}{
 		"tools":            []utils.Tool{functionTool("lookup")},

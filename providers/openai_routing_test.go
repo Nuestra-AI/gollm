@@ -9,9 +9,8 @@ import (
 	"github.com/teilomillet/gollm/types"
 )
 
-// TestIsResponsesOnlyModel pins the model families that Chat Completions cannot
-// serve. Each "true" case was verified against the supported-endpoints table on
-// developers.openai.com (see openai_routing.go for the verification date).
+// TestIsResponsesOnlyModel pins the families Chat Completions cannot serve, each
+// verified against its supported-endpoints table (see openai_routing.go).
 func TestIsResponsesOnlyModel(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -273,9 +272,8 @@ func TestResponsesRequestOmitsChatOnlyParams(t *testing.T) {
 	}
 }
 
-// TestRoutingNeverBreaksResolvableProvider guards the registry seam: routing must
-// not turn a provider the caller could resolve into an unknown-provider error.
-// A subset registry has no "openai-responses" to route to.
+// TestRoutingNeverBreaksResolvableProvider: routing must not turn a resolvable
+// provider into an unknown-provider error. A subset registry has no route target.
 func TestRoutingNeverBreaksResolvableProvider(t *testing.T) {
 	registry := NewProviderRegistry("openai")
 
@@ -292,8 +290,8 @@ func TestRoutingNeverBreaksResolvableProvider(t *testing.T) {
 	}
 }
 
-// TestRoutingRespectsRegisterOverride verifies a caller-supplied constructor under
-// "openai" is used rather than silently swapped for the built-in Responses provider.
+// TestRoutingRespectsRegisterOverride: a caller's constructor under "openai" must
+// not be swapped for the built-in Responses provider.
 func TestRoutingRespectsRegisterOverride(t *testing.T) {
 	registry := NewProviderRegistry()
 	registry.Register("openai", func(apiKey, model string, extraHeaders map[string]string) Provider {
@@ -309,8 +307,8 @@ func TestRoutingRespectsRegisterOverride(t *testing.T) {
 	}
 }
 
-// TestFineTunedModelsRouteOnBaseModel checks that the customer-chosen name in a
-// fine-tune id cannot trip the family patterns.
+// TestFineTunedModelsRouteOnBaseModel: the customer-chosen name in a fine-tune id
+// must not trip the family patterns.
 func TestFineTunedModelsRouteOnBaseModel(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -331,8 +329,8 @@ func TestFineTunedModelsRouteOnBaseModel(t *testing.T) {
 	}
 }
 
-// TestFutureChatVariantIsExcluded covers the non-reasoning chat carve-out above
-// the routing bound, which the gpt-5-chat prefix predicate could never reach.
+// TestFutureChatVariantIsExcluded covers the chat carve-out above the bound, which
+// the gpt-5-chat prefix predicate could never reach.
 func TestFutureChatVariantIsExcluded(t *testing.T) {
 	for _, model := range []string{"gpt-5.6-chat-latest", "gpt-5.4-chat"} {
 		if ModelRejectsToolsOnChatCompletions(model) {
@@ -345,8 +343,7 @@ func TestFutureChatVariantIsExcluded(t *testing.T) {
 	}
 }
 
-// imagePartsFrom pulls the content parts out of a Responses request body's first
-// input message, or nil when input is a bare string.
+// imagePartsFrom returns the content parts of the first input message, or nil.
 func imagePartsFrom(t *testing.T, body []byte) []map[string]interface{} {
 	t.Helper()
 	var request map[string]interface{}
@@ -368,10 +365,8 @@ func imagePartsFrom(t *testing.T, body []byte) []map[string]interface{} {
 	return out
 }
 
-// TestResponsesImagesUseResponsesShape covers every request path that can carry an
-// image. The Responses API needs {"type":"input_image","image_url":"<url>"}; the
-// Chat Completions shape ({"type":"image_url","image_url":{"url":…}}) is rejected.
-// Routing makes these paths reachable for callers who configured plain "openai".
+// TestResponsesImagesUseResponsesShape covers every path that can carry an image.
+// This API needs input_image with a string image_url; the Chat shape is rejected.
 func TestResponsesImagesUseResponsesShape(t *testing.T) {
 	images := []types.ContentPart{
 		{Type: types.ContentTypeImageURL, ImageURL: &types.ImageURL{URL: "https://example.com/a.png"}},
@@ -423,8 +418,7 @@ func TestResponsesImagesUseResponsesShape(t *testing.T) {
 }
 
 // TestResponsesMultiContentMessagesUseResponsesShape covers the multi-turn path,
-// where text parts also differ: "input_text" on input roles, "output_text" on
-// assistant turns — never Chat Completions' "text".
+// where text parts are input_text or output_text by role, never Chat's "text".
 func TestResponsesMultiContentMessagesUseResponsesShape(t *testing.T) {
 	tests := []struct {
 		role         string
@@ -474,11 +468,9 @@ func TestResponsesMultiContentMessagesUseResponsesShape(t *testing.T) {
 	}
 }
 
-// TestResponsesDisablesServerSideStorage pins the retention posture. On
-// /v1/responses, "store" defaults to true when omitted and stored responses are
-// retained by OpenAI for at least 30 days, whereas /v1/chat/completions retains
-// no application state. Automatic transport routing must not turn a caller's
-// prompts into retained data as a side effect of their model choice.
+// TestResponsesDisablesServerSideStorage pins the retention posture: "store" is
+// true when omitted and retains for 30+ days, where Chat Completions retains
+// nothing. Routing must not turn prompts into retained data.
 func TestResponsesDisablesServerSideStorage(t *testing.T) {
 	images := []types.ContentPart{
 		{Type: types.ContentTypeImageURL, ImageURL: &types.ImageURL{URL: "https://example.com/a.png"}},
@@ -540,8 +532,7 @@ func TestResponsesDisablesServerSideStorage(t *testing.T) {
 	}
 }
 
-// TestResponsesStoreCanBeOptedIn verifies an explicit store still wins, so callers
-// needing the stateful features that require retention are not blocked.
+// TestResponsesStoreCanBeOptedIn: an explicit store must still win.
 func TestResponsesStoreCanBeOptedIn(t *testing.T) {
 	p := NewOpenAIResponsesProvider("sk-test", "gpt-5.6-sol", nil)
 	body, err := p.PrepareRequest("hi", map[string]interface{}{"store": true})

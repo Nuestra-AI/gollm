@@ -6,11 +6,9 @@ import (
 	"github.com/teilomillet/gollm/config"
 )
 
-// TestToolReasoningPolicySelectsTransport covers the policy resolution that runs
-// when a client is built. prefer-speed (the default) keeps affected models on Chat
-// Completions, where the provider gives up reasoning on tool-carrying requests;
-// prefer-quality moves them to the Responses API, the only transport that accepts
-// function tools and reasoning together.
+// TestToolReasoningPolicySelectsTransport covers policy resolution at build time:
+// prefer-speed keeps affected models on Chat Completions, prefer-quality moves them
+// to the only transport accepting tools and reasoning together.
 func TestToolReasoningPolicySelectsTransport(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -56,9 +54,8 @@ func TestToolReasoningPolicySelectsTransport(t *testing.T) {
 	}
 }
 
-// TestToolReasoningPolicyResolvesAPIKey verifies the ordering in NewLLM: a client
-// the policy switches to the Responses transport must still find the OpenAI key,
-// which callers set under "openai".
+// TestToolReasoningPolicyResolvesAPIKey pins the ordering in NewLLM: a switched
+// client must still find the key callers set under "openai".
 func TestToolReasoningPolicyResolvesAPIKey(t *testing.T) {
 	cfg := &config.Config{
 		Provider:      "openai",
@@ -78,8 +75,8 @@ func TestToolReasoningPolicyResolvesAPIKey(t *testing.T) {
 	}
 }
 
-// TestWithOpenAIToolReasoningOption checks the exported option and its root-package
-// re-exports actually set the field callers expect.
+// TestWithOpenAIToolReasoningOption: the exported option and its re-exports must
+// set the field callers expect.
 func TestWithOpenAIToolReasoningOption(t *testing.T) {
 	cfg := &config.Config{}
 	WithOpenAIToolReasoning(ToolReasoningPreferQuality)(cfg)

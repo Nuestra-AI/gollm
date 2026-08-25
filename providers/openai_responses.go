@@ -218,14 +218,10 @@ func (p *OpenAIResponsesProvider) addToolsToRequest(request map[string]interface
 }
 
 // ---------------------------------------------------------------------------
-// Content parts
-//
-// The Responses API uses different content shapes from Chat Completions: images
-// are {"type":"input_image","image_url":"<url>"} with image_url a plain string,
-// not {"type":"image_url","image_url":{"url":…}}; text is "input_text" on input
-// roles and "output_text" on assistant turns, not "text". The shared helpers in
-// vision_helpers.go emit the Chat Completions shapes and are used by
-// OpenAIProvider, so this API needs its own converters rather than reuse.
+// Content parts. This API takes input_image with a plain-string image_url, and
+// input_text/output_text rather than text. The vision_helpers.go builders emit
+// the Chat Completions shapes and are shared with OpenAIProvider, so the
+// conversions below cannot reuse them.
 // ---------------------------------------------------------------------------
 
 // responsesImagePart converts one image ContentPart to the Responses shape.
@@ -267,8 +263,8 @@ func responsesImagesContent(images []types.ContentPart) []map[string]interface{}
 	return content
 }
 
-// responsesTextType returns the text content type for a message role. Assistant
-// turns replayed as input carry "output_text"; every other role uses "input_text".
+// responsesTextType returns the text content type for a role: assistant turns
+// replayed as input carry "output_text", everything else "input_text".
 func responsesTextType(role string) string {
 	if role == "assistant" {
 		return "output_text"
@@ -294,8 +290,8 @@ func buildResponsesContent(parts []types.ContentPart, role string) []map[string]
 	return content
 }
 
-// buildResponsesInput renders a prompt plus optional images as a Responses input
-// value: a bare string when there are no images, a single user message otherwise.
+// buildResponsesInput renders a prompt as an input value: a bare string, or a
+// single user message when images are present.
 func buildResponsesInput(prompt string, options map[string]interface{}) interface{} {
 	images, ok := options["images"].([]types.ContentPart)
 	if !ok || len(images) == 0 {
@@ -306,25 +302,11 @@ func buildResponsesInput(prompt string, options map[string]interface{}) interfac
 	return []map[string]interface{}{{"role": "user", "content": content}}
 }
 
-// applyResponsesStore pins server-side retention off unless the caller asked for it.
+// applyResponsesStore disables server-side retention unless the caller opts in.
 //
-// This is a deliberate divergence from the API default. On /v1/responses, "store"
-// is true when omitted, and a stored response is retained by OpenAI for at least
-// 30 days; /v1/chat/completions has no application-state retention at all. Without
-// this, moving a caller from Chat Completions to Responses — including the
-// automatic transport routing in openai_routing.go, which a caller never asked
-// for — would silently begin retaining their prompts and completions in the API
-// org's logs. For a multi-tenant product carrying end-customer data under
-// per-tenant keys, that is a compliance posture, not a performance knob, and it
-// must not change as a side effect of picking a model.
-//
-// An explicit store option still wins, so callers who want the stateful features
-// that require retention (previous_response_id, background mode) can opt in per
-// request. Note that with store disabled, reasoning state is not carried across
-// turns server-side; this provider replays full message history on each call
-// rather than relying on server-side state, so nothing here depends on it.
-//
-// Organizations with Zero Data Retention have store forced false regardless.
+// "store" is true when omitted here and retains the response for 30+ days, where
+// Chat Completions retains nothing — so the transport must not decide it. An
+// explicit store still wins, for previous_response_id and background mode.
 func applyResponsesStore(request map[string]interface{}) {
 	if _, ok := request["store"]; !ok {
 		request["store"] = false
@@ -878,8 +860,8 @@ func parseResponsesWebSearchOutput(output []interface{}, details *types.Response
 // ---------------------------------------------------------------------------
 
 func (p *OpenAIResponsesProvider) PrepareStreamRequest(prompt string, options map[string]interface{}) ([]byte, error) {
-	// Built from PrepareRequest rather than assembled separately: a second copy of
-	// the body-building logic silently dropped images once already.
+	// Built from PrepareRequest, not assembled separately: a second copy of this
+	// logic silently dropped images once already.
 	body, err := p.PrepareRequest(prompt, options)
 	if err != nil {
 		return nil, err

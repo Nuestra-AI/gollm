@@ -390,26 +390,15 @@ func NewLLM(opts ...ConfigOption) (LLM, error) {
 	return llmInstance, nil
 }
 
-// applyOpenAIToolReasoningPolicy selects the Responses transport for callers who
-// asked to keep reasoning on tool-carrying requests.
+// applyOpenAIToolReasoningPolicy moves a client to the Responses transport when the
+// caller asked to keep reasoning on tool-carrying requests, which Chat Completions
+// rejects from gpt-5.4 onward. See config.ToolReasoningPolicy.
 //
-// From gpt-5.4 onward, /v1/chat/completions rejects function tools combined with
-// reasoning. The default (ToolReasoningPreferSpeed) keeps those requests on Chat
-// Completions and gives up reasoning for them, because /v1/responses measures
-// several times slower. ToolReasoningPreferQuality makes the opposite trade, and
-// the only way to honor it is to move the client to /v1/responses — the one
-// transport that accepts both together.
-//
-// Resolved here, at config time, rather than in the provider registry: the
-// registry sees only a name and a model, and a per-request decision is not
-// available to it anyway, since a client is built once and speaks to one endpoint
-// for its lifetime. Rewriting the provider name keeps both this constructor and
-// llm.NewLLM in agreement without threading policy through the registry.
-//
-// Only the bare "openai" provider is affected — an explicit transport choice is
-// already a stronger statement of intent than the policy — and only for models
-// that actually carry the restriction, so choosing prefer-quality does not drag
-// gpt-4o or the o-series onto a slower endpoint for no benefit.
+// Resolved at config time rather than in the registry, which sees only a name and
+// a model: rewriting the provider name keeps this constructor and llm.NewLLM in
+// agreement. Applies only to the bare "openai" provider — an explicit transport
+// outranks a policy — and only to affected models, so prefer-quality does not drag
+// gpt-4o onto a slower endpoint.
 func applyOpenAIToolReasoningPolicy(cfg *config.Config) {
 	if cfg.Provider != "openai" || cfg.ToolReasoning != config.ToolReasoningPreferQuality {
 		return
@@ -419,17 +408,15 @@ func applyOpenAIToolReasoningPolicy(cfg *config.Config) {
 	}
 }
 
-// openAIAliasProviders are the fork-added provider names that select a specific
-// OpenAI transport — "openai-responses" for /v1/responses, "openai-chat" to pin
-// /v1/chat/completions against the automatic routing in providers/openai_routing.go.
-// All of them authenticate with the same key as plain "openai".
+// openAIAliasProviders select a specific OpenAI transport: "openai-responses" for
+// /v1/responses, "openai-chat" to pin /v1/chat/completions against automatic
+// routing. All authenticate with the same key as plain "openai".
 var openAIAliasProviders = []string{"openai-responses", "openai-chat"}
 
-// ensureOpenAIAliasKey copies the "openai" API key into the configured alias slot
-// when that slot is empty, so selecting a transport does not require duplicating
-// the key. Models routed automatically never reach here: routing happens inside
-// the provider registry and leaves cfg.Provider as "openai", so the key lookup
-// resolves normally.
+// ensureOpenAIAliasKey copies the "openai" key into the configured alias slot when
+// empty, so selecting a transport does not mean duplicating the key. Automatic
+// routing never reaches here: it happens in the registry and leaves cfg.Provider
+// as "openai".
 func ensureOpenAIAliasKey(cfg *config.Config) {
 	isAlias := false
 	for _, alias := range openAIAliasProviders {

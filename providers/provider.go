@@ -190,9 +190,8 @@ type ProviderRegistry struct {
 	configs   map[string]ProviderConfig
 	mutex     sync.RWMutex
 
-	// customized records names a caller replaced via Register. Automatic OpenAI
-	// transport routing skips them, so an explicit override is never silently
-	// swapped for a built-in provider. See openai_routing.go.
+	// customized records names a caller replaced via Register, so automatic OpenAI
+	// transport routing never swaps an override for a built-in provider.
 	customized map[string]bool
 }
 
@@ -385,9 +384,8 @@ func NewProviderRegistry(providerNames ...string) *ProviderRegistry {
 			SupportsSchema:    true,
 			SupportsStreaming: true,
 		},
-		// openai-chat pins Chat Completions, opting out of the automatic
-		// Responses routing in openai_routing.go. Identical to "openai"
-		// otherwise.
+		// openai-chat opts out of automatic Responses routing; otherwise
+		// identical to "openai".
 		"openai-chat": {
 			Name:              "openai-chat",
 			Type:              TypeOpenAI,
@@ -503,11 +501,9 @@ func (pr *ProviderRegistry) Register(name string, constructor ProviderConstructo
 func (pr *ProviderRegistry) Get(name, apiKey, model string, extraHeaders map[string]string) (Provider, error) {
 	pr.mutex.RLock()
 	// Some OpenAI models are served only by /v1/responses; see openai_routing.go.
-	// Routing is skipped when the caller registered their own constructor under
-	// this name, and falls back when the routed transport is not in this registry
-	// (a subset registry built by NewProviderRegistry("openai") has no
-	// "openai-responses"), so routing can never turn a resolvable provider into
-	// an unknown-provider error.
+	// Skipped for a caller's own constructor, and falls back when the routed
+	// transport is absent (a subset registry has no "openai-responses"), so routing
+	// can never turn a resolvable provider into an unknown-provider error.
 	if routed := routeOpenAIProvider(name, model); routed != name && !pr.customized[name] {
 		if _, ok := pr.providers[routed]; ok {
 			name = routed
