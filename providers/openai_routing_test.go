@@ -2,6 +2,7 @@ package providers
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/teilomillet/gollm/config"
@@ -468,5 +469,88 @@ func TestResponsesMultiContentMessagesUseResponsesShape(t *testing.T) {
 				t.Errorf("no input_image part in body=%s", body)
 			}
 		})
+	}
+}
+
+// TestResponsesDisablesServerSideStorage pins the retention posture. On
+// /v1/responses, "store" defaults to true when omitted and stored responses are
+// retained by OpenAI for at least 30 days, whereas /v1/chat/completions retains
+// no application state. Automatic transport routing must not turn a caller's
+// prompts into retained data as a side effect of their model choice.
+func TestResponsesDisablesServerSideStorage(t *testing.T) {
+	images := []types.ContentPart{
+		{Type: types.ContentTypeImageURL, ImageURL: &types.ImageURL{URL: "https://example.com/a.png"}},
+	}
+	schema := map[string]interface{}{"type": "object", "properties": map[string]interface{}{}}
+	msgs := []types.MemoryMessage{{Role: "user", Content: "hi"}}
+
+	paths := map[string]func(p Provider) ([]byte, error){
+		"PrepareRequest": func(p Provider) ([]byte, error) {
+			return p.PrepareRequest("hi", map[string]interface{}{})
+		},
+		"PrepareRequestWithImages": func(p Provider) ([]byte, error) {
+			return p.PrepareRequest("hi", map[string]interface{}{"images": images})
+		},
+		"PrepareRequestWithSchema": func(p Provider) ([]byte, error) {
+			return p.PrepareRequestWithSchema("hi", map[string]interface{}{}, schema)
+		},
+		"PrepareRequestWithMessages": func(p Provider) ([]byte, error) {
+			return p.PrepareRequestWithMessages(msgs, map[string]interface{}{})
+		},
+		"PrepareRequestWithMessagesAndSchema": func(p Provider) ([]byte, error) {
+			return p.PrepareRequestWithMessagesAndSchema(msgs, map[string]interface{}{}, schema)
+		},
+		"PrepareStreamRequest": func(p Provider) ([]byte, error) {
+			return p.PrepareStreamRequest("hi", map[string]interface{}{})
+		},
+		"PrepareStreamRequestWithMessages": func(p Provider) ([]byte, error) {
+			// Not on the Provider interface; reached through the streaming contract.
+			sp, ok := p.(interface {
+				PrepareStreamRequestWithMessages([]types.MemoryMessage, map[string]interface{}) ([]byte, error)
+			})
+			if !ok {
+				return nil, fmt.Errorf("provider does not implement PrepareStreamRequestWithMessages")
+			}
+			return sp.PrepareStreamRequestWithMessages(msgs, map[string]interface{}{})
+		},
+	}
+
+	for name, build := range paths {
+		t.Run(name, func(t *testing.T) {
+			p := NewOpenAIResponsesProvider("sk-test", "gpt-5.6-sol", nil)
+			body, err := build(p)
+			if err != nil {
+				t.Fatalf("%s returned error: %v", name, err)
+			}
+			var request map[string]interface{}
+			if err := json.Unmarshal(body, &request); err != nil {
+				t.Fatalf("body is not valid JSON: %v", err)
+			}
+			store, present := request["store"]
+			if !present {
+				t.Fatalf("%s omitted \"store\"; omission means the API stores the "+
+					"response for 30+ days. body=%s", name, body)
+			}
+			if store != false {
+				t.Errorf("%s set store=%v, want false", name, store)
+			}
+		})
+	}
+}
+
+// TestResponsesStoreCanBeOptedIn verifies an explicit store still wins, so callers
+// needing the stateful features that require retention are not blocked.
+func TestResponsesStoreCanBeOptedIn(t *testing.T) {
+	p := NewOpenAIResponsesProvider("sk-test", "gpt-5.6-sol", nil)
+	body, err := p.PrepareRequest("hi", map[string]interface{}{"store": true})
+	if err != nil {
+		t.Fatalf("PrepareRequest returned error: %v", err)
+	}
+	var request map[string]interface{}
+	if err := json.Unmarshal(body, &request); err != nil {
+		t.Fatalf("body is not valid JSON: %v", err)
+	}
+	if request["store"] != true {
+		t.Errorf("explicit store=true was overridden, got %v", request["store"])
 	}
 }

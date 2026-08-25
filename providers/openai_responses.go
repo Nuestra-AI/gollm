@@ -313,6 +313,31 @@ func buildResponsesInput(prompt string, options map[string]interface{}) interfac
 	return []map[string]interface{}{{"role": "user", "content": content}}
 }
 
+// applyResponsesStore pins server-side retention off unless the caller asked for it.
+//
+// This is a deliberate divergence from the API default. On /v1/responses, "store"
+// is true when omitted, and a stored response is retained by OpenAI for at least
+// 30 days; /v1/chat/completions has no application-state retention at all. Without
+// this, moving a caller from Chat Completions to Responses — including the
+// automatic transport routing in openai_routing.go, which a caller never asked
+// for — would silently begin retaining their prompts and completions in the API
+// org's logs. For a multi-tenant product carrying end-customer data under
+// per-tenant keys, that is a compliance posture, not a performance knob, and it
+// must not change as a side effect of picking a model.
+//
+// An explicit store option still wins, so callers who want the stateful features
+// that require retention (previous_response_id, background mode) can opt in per
+// request. Note that with store disabled, reasoning state is not carried across
+// turns server-side; this provider replays full message history on each call
+// rather than relying on server-side state, so nothing here depends on it.
+//
+// Organizations with Zero Data Retention have store forced false regardless.
+func applyResponsesStore(request map[string]interface{}) {
+	if _, ok := request["store"]; !ok {
+		request["store"] = false
+	}
+}
+
 // warnDroppedChatOnlyParams logs the Chat Completions parameters this API has no
 // equivalent for. They are stripped rather than forwarded (see
 // responsesExcludeKeys); without this the loss is silent, which matters most for
@@ -358,6 +383,7 @@ func (p *OpenAIResponsesProvider) PrepareRequest(prompt string, options map[stri
 	}
 	applyResponsesVerbosity(request)
 	applyResponsesReasoning(request)
+	applyResponsesStore(request)
 
 	return json.Marshal(request)
 }
@@ -399,6 +425,7 @@ func (p *OpenAIResponsesProvider) PrepareRequestWithSchema(prompt string, option
 	}
 	applyResponsesVerbosity(request)
 	applyResponsesReasoning(request)
+	applyResponsesStore(request)
 
 	return json.Marshal(request)
 }
@@ -427,6 +454,7 @@ func (p *OpenAIResponsesProvider) PrepareRequestWithMessages(messages []types.Me
 	}
 	applyResponsesVerbosity(request)
 	applyResponsesReasoning(request)
+	applyResponsesStore(request)
 
 	return json.Marshal(request)
 }
@@ -470,6 +498,7 @@ func (p *OpenAIResponsesProvider) PrepareRequestWithMessagesAndSchema(messages [
 	}
 	applyResponsesVerbosity(request)
 	applyResponsesReasoning(request)
+	applyResponsesStore(request)
 
 	return json.Marshal(request)
 }
