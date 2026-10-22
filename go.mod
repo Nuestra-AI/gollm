@@ -2,6 +2,8 @@ module github.com/teilomillet/gollm
 
 go 1.25.0
 
+toolchain go1.27.3
+
 require (
 	github.com/caarlos0/env/v11 v11.4.1
 	github.com/go-playground/validator/v10 v10.30.3
