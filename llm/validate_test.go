@@ -170,3 +170,53 @@ func TestDefaultValidate(t *testing.T) {
 		t.Error("expected invalid struct to fail")
 	}
 }
+
+// Schemas built as Go maps carry []string for a type list; JSON-decoded ones carry []interface{}.
+func TestValidateAgainstSchemaTypeLists(t *testing.T) {
+	nullableQuestion := map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"question": map[string]interface{}{"type": []string{"string", "null"}},
+		},
+	}
+	findings := map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"findings": map[string]interface{}{
+				"type": "array",
+				"items": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"suggested_answer": map[string]interface{}{"type": []string{"string", "null"}},
+					},
+				},
+			},
+		},
+	}
+
+	tests := []struct {
+		name     string
+		response string
+		schema   interface{}
+		wantErr  bool
+	}{
+		{"string in nullable", `{"question": "Do you do metal roofs?"}`, nullableQuestion, false},
+		{"null in nullable", `{"question": null}`, nullableQuestion, false},
+		{"wrong type in nullable", `{"question": 5}`, nullableQuestion, true},
+		{"nested nullable string", `{"findings": [{"suggested_answer": "a"}]}`, findings, false},
+		{"nested nullable null", `{"findings": [{"suggested_answer": null}]}`, findings, false},
+		{"type list from JSON", `{"q": null}`, `{"type":"object","properties":{"q":{"type":["string","null"]}}}`, false},
+		{"null where not listed", `{"q": null}`, `{"type":"object","properties":{"q":{"type":"string"}}}`, true},
+		{"non-string in type list", `{"q": "x"}`, `{"type":"object","properties":{"q":{"type":["string",1]}}}`, true},
+		{"empty type list", `{"q": "x"}`, `{"type":"object","properties":{"q":{"type":[]}}}`, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateAgainstSchema(tt.response, tt.schema)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateAgainstSchema() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}

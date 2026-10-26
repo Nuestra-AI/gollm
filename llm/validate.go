@@ -3,6 +3,7 @@ package llm
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"reflect"
@@ -454,11 +455,49 @@ func ValidateAgainstSchema(response string, schema interface{}) error {
 // Returns:
 //   - error: nil if validation passes, otherwise returns validation errors
 func validateJSONAgainstSchema(data interface{}, schema map[string]interface{}) error {
-	schemaType, ok := schema["type"].(string)
+	types, ok := schemaTypes(schema["type"])
 	if !ok {
 		return fmt.Errorf("schema missing 'type' field")
 	}
 
+	// A type list (e.g. ["string", "null"], OpenAI strict mode's nullable) passes if any member does.
+	failures := make([]error, 0, len(types))
+	for _, t := range types {
+		err := validateAgainstType(data, schema, t)
+		if err == nil {
+			return nil
+		}
+		failures = append(failures, err)
+	}
+	if len(failures) == 1 {
+		return failures[0]
+	}
+	return fmt.Errorf("matches none of %v: %w", types, errors.Join(failures...))
+}
+
+// schemaTypes reads "type" as one type name or a list of them ([]string when the schema is built in Go).
+func schemaTypes(t interface{}) ([]string, bool) {
+	switch v := t.(type) {
+	case string:
+		return []string{v}, true
+	case []string:
+		return v, len(v) > 0
+	case []interface{}:
+		types := make([]string, 0, len(v))
+		for _, item := range v {
+			s, ok := item.(string)
+			if !ok {
+				return nil, false
+			}
+			types = append(types, s)
+		}
+		return types, len(types) > 0
+	}
+	return nil, false
+}
+
+// validateAgainstType checks data against one JSON Schema type name.
+func validateAgainstType(data interface{}, schema map[string]interface{}, schemaType string) error {
 	switch schemaType {
 	case "object":
 		return validateObject(data, schema)
@@ -466,6 +505,11 @@ func validateJSONAgainstSchema(data interface{}, schema map[string]interface{}) 
 		return validateArray(data, schema)
 	case "string", "number", "integer", "boolean":
 		return validatePrimitive(data, schemaType)
+	case "null":
+		if data != nil {
+			return fmt.Errorf("expected null, got %T", data)
+		}
+		return nil
 	default:
 		return fmt.Errorf("unsupported schema type: %s", schemaType)
 	}
