@@ -71,9 +71,11 @@ func (p *GoogleProvider) SetDefaultOptions(config *config.Config) {
 //     PRIMARY control: when set it wins over an explicit budget/level.
 //   - thinking_budget — an explicit thinking token budget, the 2.5-family native
 //     control (0 disables thinking where allowed, -1 requests a model-chosen
-//     dynamic budget). Gemini 3 dropped token budgets.
-//   - thinking_level — "minimal"/"low"/"medium"/"high", the Gemini 3 native
-//     control (pro tiers accept only low/high). Not accepted by 2.5.
+//     dynamic budget). Gemini 3 accepted it only through a fallback to
+//     thinking_level, and upcoming models reject it with a 400, so it is sent
+//     to versioned 2.x models only.
+//   - thinking_level — "minimal"/"low"/"medium"/"high", the native control for
+//     everything else. Supported levels vary by model (see clampGemini3Level).
 //
 // The explicit controls live under extra_body.google.thinking_config and overlap
 // with reasoning_effort — the API rejects sending an effort together with a
@@ -136,35 +138,95 @@ func (p *GoogleProvider) PrepareStreamRequestWithMessages(messages []types.Memor
 	return p.withThinking(body, err, options)
 }
 
-// withThinking applies Gemini thinking normalization to a prepared body,
-// short-circuiting on a preparation error. The six prepare overrides funnel
-// through it so the normalization runs in exactly one place.
+// withThinking applies the Gemini body normalization — retired sampling
+// parameters and thinking controls — to a prepared body, short-circuiting on a
+// preparation error. The six prepare overrides funnel through it so the
+// normalization runs in exactly one place.
 func (p *GoogleProvider) withThinking(body []byte, err error, options map[string]interface{}) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return p.applyThinking(body, options)
+	var req map[string]interface{}
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil, err
+	}
+	p.dropRetiredSampling(req)
+	p.applyThinking(req, options)
+	return json.Marshal(req)
+}
+
+// geminiRetiredSamplingKeys are the sampling parameters Gemini stopped honoring.
+// Since Gemini 3.6 Flash they are pinned to the model defaults and custom values
+// have no effect; upcoming models reject requests that carry them with a 400.
+var geminiRetiredSamplingKeys = []string{"temperature", "top_p", "top_k"}
+
+// dropRetiredSampling removes temperature, top_p and top_k from a request for a
+// model that no longer honors them (see geminiAcceptsSamplingParams). gollm
+// forwards a temperature by default, so without this every request would carry one.
+func (p *GoogleProvider) dropRetiredSampling(req map[string]interface{}) {
+	if geminiAcceptsSamplingParams(p.model) {
+		return
+	}
+	for _, key := range geminiRetiredSamplingKeys {
+		if _, ok := req[key]; ok {
+			delete(req, key)
+			p.logger.Debug("Dropped sampling parameter this Gemini model no longer accepts",
+				"parameter", key, "model", p.model)
+		}
+	}
+}
+
+// geminiAcceptsSamplingParams reports whether the model still honors temperature,
+// top_p and top_k: Gemini models before 3.6. Unversioned Gemini ids ("-latest"
+// aliases and unknown names) fall through to "does not accept", as on Anthropic:
+// a stripped parameter degrades to the model default, where forwarding one an
+// upcoming model rejects fails the whole request. Non-Gemini models served by the
+// same endpoint (Gemma) are left alone.
+func geminiAcceptsSamplingParams(model string) bool {
+	if !strings.Contains(strings.ToLower(model), "gemini") {
+		return true
+	}
+	major, minor := geminiVersion(model)
+	if major == 0 {
+		return false
+	}
+	return major < 3 || (major == 3 && minor < 6)
+}
+
+// geminiVersion returns the major and minor version parsed from a Gemini model id
+// ("gemini-2.5-flash" -> 2, 5; "gemini-3-pro-preview" -> 3, 0), or 0, 0 when no
+// numeric version is present ("gemini-flash-latest", "gemini-future-x").
+func geminiVersion(model string) (major, minor int) {
+	m := strings.ToLower(model)
+	i := strings.Index(m, "gemini-")
+	if i < 0 {
+		return 0, 0
+	}
+	rest := m[i+len("gemini-"):]
+	digits := func(s string) (int, int) {
+		j := 0
+		for j < len(s) && s[j] >= '0' && s[j] <= '9' {
+			j++
+		}
+		n, _ := strconv.Atoi(s[:j])
+		return n, j
+	}
+	major, j := digits(rest)
+	if j == 0 {
+		return 0, 0
+	}
+	if j < len(rest) && rest[j] == '.' {
+		minor, _ = digits(rest[j+1:])
+	}
+	return major, minor
 }
 
 // geminiMajorVersion returns the integer major version parsed from a Gemini
 // model id ("gemini-2.5-flash" -> 2, "gemini-3-pro-preview" -> 3), or 0 when no
 // numeric version is present ("gemini-flash-latest", "gemini-future-x").
 func geminiMajorVersion(model string) int {
-	m := strings.ToLower(model)
-	i := strings.Index(m, "gemini-")
-	if i < 0 {
-		return 0
-	}
-	rest := m[i+len("gemini-"):]
-	j := 0
-	for j < len(rest) && rest[j] >= '0' && rest[j] <= '9' {
-		j++
-	}
-	if j == 0 {
-		return 0
-	}
-	n, _ := strconv.Atoi(rest[:j])
-	return n
+	major, _ := geminiVersion(model)
+	return major
 }
 
 // isGeminiThinkingModel reports whether the model supports Gemini's thinking
@@ -184,21 +246,14 @@ func isGeminiThinkingModel(model string) bool {
 	return true
 }
 
-// isGemini3Model reports whether the model belongs to the Gemini 3+ family,
-// whose native explicit control is thinking_level (not thinking_budget). Known
-// 1.x/2.x ids are not 3.x. Among unversioned ids, only the "-latest" aliases
-// (gemini-flash-latest, gemini-pro-latest) fail open to 3.x, since "latest"
-// tracks the newest generation; other unrecognized ids default to the 2.x form
-// rather than risk sending a 3.x-only thinking_level to a 2.x endpoint.
+// isGemini3Model reports whether the model takes thinking_level rather than
+// thinking_budget: every model except the versioned 1.x/2.x ids. Unversioned ids
+// ("-latest" aliases, unknown names) get thinking_level because Gemini 3 only
+// accepted thinking_budget through a fallback that upcoming models drop — they
+// return 400 INVALID_ARGUMENT for it — while every 2.x id carries its version.
 func isGemini3Model(model string) bool {
-	switch v := geminiMajorVersion(model); {
-	case v >= 3:
-		return true
-	case v == 1 || v == 2:
-		return false
-	default:
-		return strings.Contains(strings.ToLower(model), "latest")
-	}
+	v := geminiMajorVersion(model)
+	return v != 1 && v != 2
 }
 
 // geminiIsProModel reports whether the model is a Gemini "pro" tier. Pro tiers
@@ -247,18 +302,28 @@ func (p *GoogleProvider) effortForModel(effort string) string {
 	return e
 }
 
-// clampGemini3Level constrains a canonical thinking_level (minimal/low/medium/
-// high) to the set a model accepts. Pro tiers accept only low/high, so minimal
-// collapses to low and medium to high; other 3.x models (flash and unknown
-// future ids) accept the full set.
-func clampGemini3Level(level, model string) string {
+// geminiAcceptsMinimalLevel reports whether the model accepts thinking_level
+// "minimal": the non-pro 3.x models through 3.6. Pro tiers never did, and the
+// newer models (3.8 Flash, 4 Argon) dropped it, so unversioned and unknown ids
+// fall through to "does not accept".
+// https://ai.google.dev/gemini-api/docs/thinking (2026-10-27)
+func geminiAcceptsMinimalLevel(model string) bool {
 	if geminiIsProModel(model) {
-		switch level {
-		case "minimal":
-			return "low"
-		case "medium":
-			return "high"
-		}
+		return false
+	}
+	major, minor := geminiVersion(model)
+	return major == 3 && minor <= 6
+}
+
+// clampGemini3Level constrains a canonical thinking_level (minimal/low/medium/
+// high) to the set a model accepts. minimal collapses to low where it is not
+// accepted (see geminiAcceptsMinimalLevel), and medium to high on pro tiers.
+func clampGemini3Level(level, model string) string {
+	if level == "minimal" && !geminiAcceptsMinimalLevel(model) {
+		return "low"
+	}
+	if level == "medium" && geminiIsProModel(model) {
+		return "high"
 	}
 	return level
 }
@@ -412,17 +477,12 @@ func (p *GoogleProvider) resolveThinkingIntent(options map[string]interface{}) g
 	return intent
 }
 
-// applyThinking normalizes Gemini thinking controls on an already-marshaled
-// request body. reasoning_effort is the primary control (it wins over an explicit
+// applyThinking normalizes Gemini thinking controls on a decoded request body,
+// in place. reasoning_effort is the primary control (it wins over an explicit
 // budget/level); a budget/level applies only when no effort is set;
 // include_thoughts is orthogonal. When nothing is requested — or the model does
 // not support thinking — the model's own defaults are left untouched.
-func (p *GoogleProvider) applyThinking(body []byte, options map[string]interface{}) ([]byte, error) {
-	var req map[string]interface{}
-	if err := json.Unmarshal(body, &req); err != nil {
-		return nil, err
-	}
-
+func (p *GoogleProvider) applyThinking(req, options map[string]interface{}) {
 	// reasoning_effort/thinking_budget/thinking_level/include_thoughts are gollm
 	// option keys, not valid Gemini top-level fields; strip any that leaked
 	// through the OpenAI option passthrough (e.g. a provider-level SetOption)
@@ -438,7 +498,7 @@ func (p *GoogleProvider) applyThinking(body []byte, options map[string]interface
 
 	// Nothing requested, or a non-thinking model: leave the model's own defaults.
 	if !requested || !isGeminiThinkingModel(p.model) {
-		return json.Marshal(req)
+		return
 	}
 
 	switch {
@@ -461,7 +521,6 @@ func (p *GoogleProvider) applyThinking(body []byte, options map[string]interface
 	// whole extra_body, which may carry unrelated caller-supplied data.
 	p.logger.Debug("Gemini thinking configured",
 		"model", p.model, "reasoning_effort", req["reasoning_effort"], "thinking_config", geminiThinkingConfigOf(req))
-	return json.Marshal(req)
 }
 
 // explicitThinkingConfig resolves an explicit budget/level into the thinking_config

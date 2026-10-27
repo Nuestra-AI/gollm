@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/teilomillet/gollm/config"
 	"github.com/teilomillet/gollm/types"
 )
 
@@ -446,23 +447,90 @@ func TestGeminiLatestAliasesRouteTo3x(t *testing.T) {
 	}
 }
 
-// TestGeminiUnversionedNonLatestDefaultsTo2x verifies an unversioned id that is
-// not a "-latest" alias routes to the 2.x form (thinking_budget), not 3.x
-// thinking_level.
-func TestGeminiUnversionedNonLatestDefaultsTo2x(t *testing.T) {
-	body, err := newGoogle(t, "gemini-exp").PrepareRequest("hi", map[string]interface{}{"thinking_budget": 4096})
+// TestGeminiUnknownModelsNeverGetBudget verifies only versioned 2.x ids receive a
+// thinking_budget: upcoming models reject it with a 400, so unversioned and newer
+// ids get the equivalent thinking_level instead.
+func TestGeminiUnknownModelsNeverGetBudget(t *testing.T) {
+	for _, model := range []string{"gemini-exp", "gemini-3.8-flash", "gemini-4-argon"} {
+		body, err := newGoogle(t, model).PrepareRequest("hi", map[string]interface{}{"thinking_budget": 4096})
+		if err != nil {
+			t.Fatalf("%s: PrepareRequest failed: %v", model, err)
+		}
+		cfg := geminiThinkingConfig(t, decodeGoogleRequest(t, body))
+		if _, hasBudget := cfg["thinking_budget"]; hasBudget {
+			t.Errorf("%s: must not receive a thinking_budget, got %v", model, cfg)
+		}
+		if cfg["thinking_level"] != "low" {
+			t.Errorf("%s: expected budget 4096 translated to thinking_level=low, got %v", model, cfg["thinking_level"])
+		}
+	}
+}
+
+// TestGeminiMinimalLevelClamp verifies "minimal" is sent only to the models that
+// list it, and collapses to "low" on the newer models that dropped it.
+func TestGeminiMinimalLevelClamp(t *testing.T) {
+	cases := map[string]string{
+		"gemini-3-flash-preview": "minimal", "gemini-3.1-flash-lite": "minimal",
+		"gemini-3.6-flash": "minimal", "gemini-3.8-flash": "low",
+		"gemini-4-argon": "low", "gemini-flash-latest": "low",
+	}
+	for model, want := range cases {
+		body, err := newGoogle(t, model).PrepareRequest("hi", map[string]interface{}{"thinking_level": "none"})
+		if err != nil {
+			t.Fatalf("%s: PrepareRequest failed: %v", model, err)
+		}
+		cfg := geminiThinkingConfig(t, decodeGoogleRequest(t, body))
+		if cfg["thinking_level"] != want {
+			t.Errorf("%s: expected thinking_level=%q, got %v", model, want, cfg["thinking_level"])
+		}
+	}
+}
+
+// TestGeminiRetiredSamplingDropped verifies temperature, top_p and top_k are
+// stripped from Gemini 3.6+ and unversioned ids, and kept on earlier models and
+// non-Gemini models served by the same endpoint.
+func TestGeminiRetiredSamplingDropped(t *testing.T) {
+	cases := map[string]bool{ // model -> sampling kept
+		"gemini-2.5-flash": true, "gemini-3-flash-preview": true, "gemini-3.5-flash": true,
+		"gemma-3-27b-it": true, "gemini-3.6-flash": false, "gemini-3.8-flash": false,
+		"gemini-4-argon": false, "gemini-flash-latest": false,
+	}
+	for model, kept := range cases {
+		p := newGoogle(t, model)
+		p.SetOption("temperature", 0.7) // what SetDefaultOptions forwards by default
+		body, err := p.PrepareRequest("hi", map[string]interface{}{"top_p": 0.9, "top_k": 40})
+		if err != nil {
+			t.Fatalf("%s: PrepareRequest failed: %v", model, err)
+		}
+		req := decodeGoogleRequest(t, body)
+		if _, has := req["temperature"]; has != kept {
+			t.Errorf("%s: temperature present=%v, want %v", model, has, kept)
+		}
+		if _, has := req["top_p"]; has != kept {
+			t.Errorf("%s: top_p present=%v, want %v", model, has, kept)
+		}
+		if _, has := req["top_k"]; has {
+			t.Errorf("%s: top_k must never reach the compat endpoint", model)
+		}
+	}
+}
+
+// TestGeminiFrequencyPenaltyNeverSent verifies frequency_penalty is dropped from
+// both the defaults and per-request options: the compat endpoint rejects the
+// field at any value, so forwarding the configured 0 failed every request.
+func TestGeminiFrequencyPenaltyNeverSent(t *testing.T) {
+	p := newGoogle(t, "gemini-3.5-flash")
+	p.SetDefaultOptions(&config.Config{Temperature: 0.7, MaxTokens: 100, FrequencyPenalty: 0, PresencePenalty: 0})
+	body, err := p.PrepareRequest("hi", map[string]interface{}{"frequency_penalty": 0.5})
 	if err != nil {
 		t.Fatalf("PrepareRequest failed: %v", err)
 	}
-	cfg := geminiThinkingConfig(t, decodeGoogleRequest(t, body))
-	if _, hasLevel := cfg["thinking_level"]; hasLevel {
-		t.Errorf("unversioned non-latest id must not route to 3.x thinking_level, got %v", cfg)
+	req := decodeGoogleRequest(t, body)
+	if _, has := req["frequency_penalty"]; has {
+		t.Errorf("frequency_penalty must never reach the compat endpoint, got %v", req["frequency_penalty"])
 	}
-	if mustFloat(t, cfg["thinking_budget"], "thinking_budget") != 4096 {
-		t.Errorf("expected 2.x thinking_budget=4096, got %v", cfg["thinking_budget"])
-	}
-	if isGemini3Model("gemini-exp") {
-		t.Errorf("gemini-exp (unversioned, non-latest) must not be treated as 3.x")
+	if _, has := req["presence_penalty"]; !has {
+		t.Errorf("presence_penalty is accepted and should still be forwarded")
 	}
 }
 
@@ -534,6 +602,14 @@ func TestGeminiMajorVersionParsing(t *testing.T) {
 	}
 	if isGemini3Model("gemini-2.5-flash") {
 		t.Errorf("gemini-2.5 must not be treated as 3.x")
+	}
+	for model, want := range map[string][2]int{
+		"gemini-3.6-flash": {3, 6}, "gemini-3-pro-preview": {3, 0}, "gemini-2.5-pro": {2, 5},
+		"gemini-3.10-flash": {3, 10}, "gemini-flash-latest": {0, 0},
+	} {
+		if major, minor := geminiVersion(model); major != want[0] || minor != want[1] {
+			t.Errorf("geminiVersion(%q)=%d.%d, want %d.%d", model, major, minor, want[0], want[1])
+		}
 	}
 }
 

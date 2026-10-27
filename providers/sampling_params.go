@@ -154,12 +154,14 @@ var deepSeekSamplingParams = []paramSpec{
 
 // googleSamplingParams covers Gemini's OpenAI-compatibility endpoint, which publishes
 // no parameter matrix (https://ai.google.dev/gemini-api/docs/openai, 2026-08-25), so
-// it is held to the OpenAI shape it emulates.
+// it is held to the OpenAI shape it emulates, less what the endpoint was observed to
+// reject (2026-10-27): frequency_penalty, seed and top_k fail every request with 400
+// "Unknown name ... Cannot find field". temperature and top_p are further gated per
+// model; see geminiAcceptsSamplingParams.
 var googleSamplingParams = []paramSpec{
 	{"temperature", srcTemperature},
 	{"max_tokens", srcMaxTokens},
 	{"top_p", srcTopP},
-	{"frequency_penalty", srcFrequencyPenalty},
 	{"presence_penalty", srcPresencePenalty},
 	{"stop", srcStopSequences},
 }
