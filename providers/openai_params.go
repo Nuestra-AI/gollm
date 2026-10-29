@@ -70,7 +70,7 @@ func filterToAllowedParams(request map[string]interface{}, allowed map[string]bo
 // own models and parameters — google-openai carries Gemini's thinking budget in
 // extra_body.google — so OpenAI's vocabulary would delete settings those endpoints
 // accept. Scoped by model like stripUnsupportedReasoningParams. The Responses
-// provider needs no such guard: nothing embeds it.
+// provider needs no such guard: xAI, which embeds it, supplies its own allowlist.
 func filterToOpenAIChatParams(model string, request map[string]interface{}, logger utils.Logger) {
 	// Unwrapped first: a fine-tune id ("ft:gpt-4o-mini-…") is not gpt- prefixed, so
 	// the raw check would classify OpenAI's own model as someone else's catalogue

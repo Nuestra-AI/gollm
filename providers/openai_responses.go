@@ -21,6 +21,13 @@ type OpenAIResponsesProvider struct {
 	extraHeaders map[string]string
 	options      map[string]interface{}
 	logger       utils.Logger
+
+	// Set by a provider that embeds this one to reuse the wire format against its own
+	// catalogue (xAI). Nil means OpenAI's: responsesAllowedParams, no adaptation and
+	// no built-in tools beyond OpenAI's.
+	allowedParams map[string]bool
+	adaptOptions  func(model string, request map[string]interface{})
+	builtinTools  map[string]bool
 }
 
 // NewOpenAIResponsesProvider creates a new OpenAI Responses API provider.
@@ -127,6 +134,12 @@ var responsesExcludeKeys = []string{
 func (p *OpenAIResponsesProvider) buildTools(tools []utils.Tool, strictTools bool) []map[string]interface{} {
 	var result []map[string]interface{}
 	for _, tool := range tools {
+		// An embedding provider's own built-ins, which would otherwise fall through to
+		// the function wrapper below and be sent as a nameless function.
+		if p.builtinTools[tool.Type] {
+			result = append(result, map[string]interface{}{"type": tool.Type})
+			continue
+		}
 		switch tool.Type {
 		case "web_search":
 			t := map[string]interface{}{"type": "web_search"}
@@ -315,6 +328,24 @@ func applyResponsesStore(request map[string]interface{}) {
 	}
 }
 
+// finishRequest applies the post-merge steps every request builder shares: an
+// embedding provider's adaptations first, then nesting into the Responses shape,
+// then the allowlist.
+func (p *OpenAIResponsesProvider) finishRequest(request map[string]interface{}) {
+	if p.adaptOptions != nil {
+		p.adaptOptions(p.model, request)
+	}
+	applyResponsesVerbosity(request)
+	applyResponsesReasoning(request)
+	applyResponsesStore(request)
+	translateResponseFormatToText(request)
+	allowed := p.allowedParams
+	if allowed == nil {
+		allowed = responsesAllowedParams
+	}
+	filterToAllowedParams(request, allowed, "/v1/responses", p.logger)
+}
+
 // ---------------------------------------------------------------------------
 // PrepareRequest — simple prompt → Responses API format
 // ---------------------------------------------------------------------------
@@ -339,11 +370,7 @@ func (p *OpenAIResponsesProvider) PrepareRequest(prompt string, options map[stri
 	for k, v := range merged {
 		request[k] = v
 	}
-	applyResponsesVerbosity(request)
-	applyResponsesReasoning(request)
-	applyResponsesStore(request)
-	translateResponseFormatToText(request)
-	filterToAllowedParams(request, responsesAllowedParams, "/v1/responses", p.logger)
+	p.finishRequest(request)
 
 	return json.Marshal(request)
 }
@@ -383,11 +410,7 @@ func (p *OpenAIResponsesProvider) PrepareRequestWithSchema(prompt string, option
 	for k, v := range merged {
 		request[k] = v
 	}
-	applyResponsesVerbosity(request)
-	applyResponsesReasoning(request)
-	applyResponsesStore(request)
-	translateResponseFormatToText(request)
-	filterToAllowedParams(request, responsesAllowedParams, "/v1/responses", p.logger)
+	p.finishRequest(request)
 
 	return json.Marshal(request)
 }
@@ -414,11 +437,7 @@ func (p *OpenAIResponsesProvider) PrepareRequestWithMessages(messages []types.Me
 	for k, v := range merged {
 		request[k] = v
 	}
-	applyResponsesVerbosity(request)
-	applyResponsesReasoning(request)
-	applyResponsesStore(request)
-	translateResponseFormatToText(request)
-	filterToAllowedParams(request, responsesAllowedParams, "/v1/responses", p.logger)
+	p.finishRequest(request)
 
 	return json.Marshal(request)
 }
@@ -460,11 +479,7 @@ func (p *OpenAIResponsesProvider) PrepareRequestWithMessagesAndSchema(messages [
 	for k, v := range merged {
 		request[k] = v
 	}
-	applyResponsesVerbosity(request)
-	applyResponsesReasoning(request)
-	applyResponsesStore(request)
-	translateResponseFormatToText(request)
-	filterToAllowedParams(request, responsesAllowedParams, "/v1/responses", p.logger)
+	p.finishRequest(request)
 
 	return json.Marshal(request)
 }

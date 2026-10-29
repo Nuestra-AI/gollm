@@ -212,6 +212,7 @@ type ProviderRegistry struct {
 //   - "cohere": Cohere's models
 //   - "deepseek": DeepSeek's models
 //   - "google-openai": Google's Gemini models using OpenAI compatible API
+//   - "xai": xAI's Grok models via its Responses API
 //
 // Example usage:
 //
@@ -245,6 +246,7 @@ func NewProviderRegistry(providerNames ...string) *ProviderRegistry {
 		"vllm":             NewVLLMProvider,
 		"openai-responses": NewOpenAIResponsesProvider,
 		"openai-chat":      NewOpenAIProvider,
+		"xai":              NewXAIProvider,
 	}
 
 	// Standard provider configurations
@@ -386,6 +388,16 @@ func NewProviderRegistry(providerNames ...string) *ProviderRegistry {
 			Name:              "openai-responses",
 			Type:              TypeOpenAI,
 			Endpoint:          "https://api.openai.com/v1/responses",
+			AuthHeader:        "Authorization",
+			AuthPrefix:        "Bearer ",
+			RequiredHeaders:   map[string]string{"Content-Type": "application/json"},
+			SupportsSchema:    true,
+			SupportsStreaming: true,
+		},
+		"xai": {
+			Name:              "xai",
+			Type:              TypeOpenAI,
+			Endpoint:          "https://api.x.ai/v1/responses",
 			AuthHeader:        "Authorization",
 			AuthPrefix:        "Bearer ",
 			RequiredHeaders:   map[string]string{"Content-Type": "application/json"},

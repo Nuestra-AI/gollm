@@ -454,6 +454,7 @@ func TestSamplingWireNamesCoversEveryTable(t *testing.T) {
 		openRouterSamplingParams, deepSeekSamplingParams, googleSamplingParams,
 		cohereSamplingParams, vllmSamplingParams, lmStudioSamplingParams,
 		aliyunSamplingParams, ollamaSamplingParams, bedrockSamplingParams,
+		xaiSamplingParams,
 	} {
 		for _, spec := range table {
 			if !samplingWireNames[spec.wire] {

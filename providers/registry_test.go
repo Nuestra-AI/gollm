@@ -29,6 +29,7 @@ func TestProviderRegistration(t *testing.T) {
 		"lmstudio",     // LM Studio local server
 		"lambda",       // Lambda Labs
 		"bedrock",      // AWS Bedrock
+		"xai",          // xAI Grok
 	}
 
 	registry := GetDefaultRegistry()
@@ -62,6 +63,7 @@ func TestNewProviderRegistryContainsKnownProviders(t *testing.T) {
 		"openrouter",
 		"lambda",
 		"bedrock",
+		"xai",
 	}
 
 	registry := NewProviderRegistry()
@@ -113,6 +115,7 @@ func TestProviderConfigsExist(t *testing.T) {
 		"openrouter",
 		"lambda",
 		"bedrock",
+		"xai",
 	}
 
 	registry := GetDefaultRegistry()

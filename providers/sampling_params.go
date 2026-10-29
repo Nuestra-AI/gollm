@@ -93,6 +93,17 @@ var openAIResponsesSamplingParams = []paramSpec{
 	{"top_p", srcTopP},
 }
 
+// xaiSamplingParams is the sampling subset of xAI's POST /v1/responses: OpenAI's set
+// plus top_k and min_p. Like OpenAI's Responses API it has no seed, penalties or stop.
+// https://docs.x.ai/docs/api-reference (2026-10-27).
+var xaiSamplingParams = []paramSpec{
+	{"temperature", srcTemperature},
+	{"max_tokens", srcMaxTokens},
+	{"top_p", srcTopP},
+	{"top_k", srcTopK},
+	{"min_p", srcMinP},
+}
+
 // anthropicSamplingParams is the Messages API sampling set. temperature, top_p and
 // top_k reach the wire only on models through Claude Opus 4.6; see
 // anthropicAcceptsSamplingParams. No seed, no penalties.
@@ -272,7 +283,7 @@ var samplingWireNames = func() map[string]bool {
 		openAIChatSamplingParams, anthropicSamplingParams, mistralSamplingParams,
 		openRouterSamplingParams, deepSeekSamplingParams, googleSamplingParams,
 		cohereSamplingParams, vllmSamplingParams, lmStudioSamplingParams,
-		aliyunSamplingParams, ollamaSamplingParams,
+		aliyunSamplingParams, ollamaSamplingParams, xaiSamplingParams,
 	} {
 		for _, spec := range table {
 			names[spec.wire] = true

@@ -69,6 +69,7 @@
 - **Groq**: Llama-3, Mixtral models with high-speed inference
 - **Ollama**: Local models support (Llama-3, Mistral, etc.)
 - **Mistral**: Mistral Large, Mistral Medium
+- **xAI**: Grok models via xAI's Responses API (`SetProvider("xai")`, key from `XAI_API_KEY`)
 - **OpenRouter**: Access to multiple providers through a single API with:
   - Model fallback capabilities
   - Auto-routing between models
