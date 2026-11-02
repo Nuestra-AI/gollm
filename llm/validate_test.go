@@ -209,6 +209,60 @@ func TestValidateAgainstSchemaTypeLists(t *testing.T) {
 		{"null where not listed", `{"q": null}`, `{"type":"object","properties":{"q":{"type":"string"}}}`, true},
 		{"non-string in type list", `{"q": "x"}`, `{"type":"object","properties":{"q":{"type":["string",1]}}}`, true},
 		{"empty type list", `{"q": "x"}`, `{"type":"object","properties":{"q":{"type":[]}}}`, true},
+		// A misspelled name is a schema error even when another listed type matches the data.
+		{"misspelled name beside null", `{"q": null}`, `{"type":"object","properties":{"q":{"type":["strng","null"]}}}`, true},
+		{"misspelled name in Go list", `{"q": null}`, map[string]interface{}{
+			"type":       "object",
+			"properties": map[string]interface{}{"q": map[string]interface{}{"type": []string{"strng", "null"}}},
+		}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateAgainstSchema(tt.response, tt.schema)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateAgainstSchema() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// "required" is []string when the schema is built in Go, and an object schema with no "properties"
+// accepts any object, which is how a free-form nullable object is written.
+func TestValidateAgainstSchemaObjectKeywords(t *testing.T) {
+	requiredGo := map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"question": map[string]interface{}{"type": []string{"string", "null"}},
+		},
+		"required": []string{"question"},
+	}
+	freeForm := map[string]interface{}{"type": []string{"object", "null"}}
+
+	tests := []struct {
+		name     string
+		response string
+		schema   interface{}
+		wantErr  bool
+	}{
+		{"required Go list, field missing", `{}`, requiredGo, true},
+		{"required Go list, field null", `{"question": null}`, requiredGo, false},
+		{"required JSON list, field missing", `{}`, `{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}`, true},
+		{"required list holds non-string", `{}`, `{"type":"object","properties":{"q":{"type":"string"}},"required":[1]}`, true},
+		{"free-form nullable object, object", `{"k": 1}`, freeForm, false},
+		{"free-form nullable object, null", `null`, freeForm, false},
+		{"free-form nullable object, string", `"x"`, freeForm, true},
+		{"properties of the wrong type", `{}`, `{"type":"object","properties":[]}`, true},
+		{"required with no properties, field missing", `{}`, `{"type":"object","required":["id"]}`, true},
+		{"required field not in properties, missing", `{"q": "x"}`, `{"type":"object","properties":{"q":{"type":"string"}},"required":["q","id"]}`, true},
+		{"draft-3 required: true is ignored", `{"a": {}}`, `{"type":"object","properties":{"a":{"type":"object","properties":{},"required":true}}}`, false},
+		{"free-form nullable array, array", `[1, "x"]`, `{"type":["array","null"]}`, false},
+		{"free-form nullable array, string", `"x"`, `{"type":["array","null"]}`, true},
+		{"property schema as map[string]string", `{"q": 5}`, map[string]interface{}{
+			"type":       "object",
+			"properties": map[string]interface{}{"q": map[string]string{"type": "string"}},
+		}, true},
+		{"property schema that is not an object", `{"q": 5}`, `{"type":"object","properties":{"q":true}}`, true},
 	}
 
 	for _, tt := range tests {

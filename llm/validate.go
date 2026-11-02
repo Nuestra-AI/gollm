@@ -425,10 +425,10 @@ func ValidateAgainstSchema(response string, schema interface{}) error {
 		if err := json.Unmarshal(s, &schemaMap); err != nil {
 			return fmt.Errorf("failed to parse schema JSON bytes: %w", err)
 		}
-	case map[string]interface{}:
-		schemaMap = s
 	default:
-		// Try to marshal and unmarshal to ensure we have a proper object
+		// Round-trip everything else, Go map literals included, so the validator only ever sees the
+		// shapes JSON decodes to: a []string type list arrives as []interface{}, a map[string]string
+		// property schema as map[string]interface{}.
 		schemaBytes, err := json.Marshal(schema)
 		if err != nil {
 			return fmt.Errorf("failed to marshal schema: %w", err)
@@ -448,6 +448,10 @@ func ValidateAgainstSchema(response string, schema interface{}) error {
 // validateJSONAgainstSchema performs the actual JSON schema validation.
 // It recursively validates complex data structures against their schema.
 //
+// The schema must be JSON-decoded, as ValidateAgainstSchema makes it: lists are []interface{} and
+// objects map[string]interface{}. The helpers below read only those shapes, so a Go literal such as
+// a []string type list must not reach here unconverted.
+//
 // Parameters:
 //   - data: The data to validate
 //   - schema: The schema to validate against
@@ -458,6 +462,13 @@ func validateJSONAgainstSchema(data interface{}, schema map[string]interface{}) 
 	types, ok := schemaTypes(schema["type"])
 	if !ok {
 		return fmt.Errorf("schema missing 'type' field")
+	}
+
+	// Check every name first, so a misspelled one is reported even when another listed type matches.
+	for _, t := range types {
+		if !knownSchemaType(t) {
+			return fmt.Errorf("unsupported schema type: %s", t)
+		}
 	}
 
 	// A type list (e.g. ["string", "null"], OpenAI strict mode's nullable) passes if any member does.
@@ -475,13 +486,11 @@ func validateJSONAgainstSchema(data interface{}, schema map[string]interface{}) 
 	return fmt.Errorf("matches none of %v: %w", types, errors.Join(failures...))
 }
 
-// schemaTypes reads "type" as one type name or a list of them ([]string when the schema is built in Go).
+// schemaTypes reads "type" as one type name or a list of them.
 func schemaTypes(t interface{}) ([]string, bool) {
 	switch v := t.(type) {
 	case string:
 		return []string{v}, true
-	case []string:
-		return v, len(v) > 0
 	case []interface{}:
 		types := make([]string, 0, len(v))
 		for _, item := range v {
@@ -494,6 +503,33 @@ func schemaTypes(t interface{}) ([]string, bool) {
 		return types, len(types) > 0
 	}
 	return nil, false
+}
+
+// knownSchemaType reports whether validateAgainstType can check a type name.
+func knownSchemaType(t string) bool {
+	switch t {
+	case "object", "array", "string", "number", "integer", "boolean", "null":
+		return true
+	}
+	return false
+}
+
+// requiredFields reads "required" as a list of field names, from a JSON-decoded schema. A value that
+// is not a list, such as the old draft-3 "required": true on a property, is ignored as it always has been.
+func requiredFields(r interface{}) ([]string, error) {
+	list, ok := r.([]interface{})
+	if !ok {
+		return nil, nil
+	}
+	fields := make([]string, 0, len(list))
+	for _, item := range list {
+		s, ok := item.(string)
+		if !ok {
+			return nil, fmt.Errorf("schema 'required' list holds %T, want string", item)
+		}
+		fields = append(fields, s)
+	}
+	return fields, nil
 }
 
 // validateAgainstType checks data against one JSON Schema type name.
@@ -530,25 +566,37 @@ func validateObject(data interface{}, schema map[string]interface{}) error {
 		return fmt.Errorf("expected object, got %T", data)
 	}
 
-	properties, ok := schema["properties"].(map[string]interface{})
-	if !ok {
-		return fmt.Errorf("invalid 'properties' in schema")
+	// No "properties" means any object is accepted, as in {"type": ["object", "null"]}.
+	var properties map[string]interface{}
+	if raw, present := schema["properties"]; present {
+		if properties, ok = raw.(map[string]interface{}); !ok {
+			return fmt.Errorf("invalid 'properties' in schema")
+		}
+	}
+
+	// Required fields are checked on their own, so one missing from "properties" (or with no
+	// "properties" at all) is still enforced.
+	required, err := requiredFields(schema["required"])
+	if err != nil {
+		return err
+	}
+	for _, key := range required {
+		if _, exists := dataMap[key]; !exists {
+			return fmt.Errorf("missing required field: %s", key)
+		}
 	}
 
 	for key, propSchema := range properties {
 		propData, exists := dataMap[key]
 		if !exists {
-			if required, ok := schema["required"].([]interface{}); ok {
-				for _, req := range required {
-					if req.(string) == key {
-						return fmt.Errorf("missing required field: %s", key)
-					}
-				}
-			}
 			continue
 		}
 
-		if err := validateJSONAgainstSchema(propData, propSchema.(map[string]interface{})); err != nil {
+		propMap, ok := propSchema.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("invalid schema for field '%s': got %T, want an object", key, propSchema)
+		}
+		if err := validateJSONAgainstSchema(propData, propMap); err != nil {
 			return fmt.Errorf("invalid field '%s': %w", key, err)
 		}
 	}
@@ -571,7 +619,12 @@ func validateArray(data interface{}, schema map[string]interface{}) error {
 		return fmt.Errorf("expected array, got %T", data)
 	}
 
-	items, ok := schema["items"].(map[string]interface{})
+	// No "items" means any array is accepted, as in {"type": ["array", "null"]}.
+	raw, present := schema["items"]
+	if !present {
+		return nil
+	}
+	items, ok := raw.(map[string]interface{})
 	if !ok {
 		return fmt.Errorf("invalid 'items' in schema")
 	}

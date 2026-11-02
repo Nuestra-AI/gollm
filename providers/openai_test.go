@@ -47,3 +47,66 @@ func TestNeedsMaxCompletionTokens(t *testing.T) {
 		})
 	}
 }
+
+// Strict mode requires additionalProperties: false on every object, including a nullable one
+// whose type is a list such as ["object", "null"].
+func TestCleanSchemaForOpenAINullableObject(t *testing.T) {
+	schema := map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"fromJSON": map[string]interface{}{
+				"type":       []interface{}{"object", "null"},
+				"properties": map[string]interface{}{"a": map[string]interface{}{"type": "string"}},
+			},
+			"fromGo": map[string]interface{}{
+				"type":       []string{"null", "object"},
+				"properties": map[string]interface{}{"b": map[string]interface{}{"type": "string"}},
+			},
+			"text": map[string]interface{}{"type": []interface{}{"string", "null"}},
+		},
+	}
+
+	cleaned := cleanSchemaForOpenAI(schema).(map[string]interface{})
+	props := cleaned["properties"].(map[string]interface{})
+
+	assert.Equal(t, false, cleaned["additionalProperties"], "root object")
+	assert.Equal(t, false, props["fromJSON"].(map[string]interface{})["additionalProperties"], "nullable object from JSON")
+	assert.Equal(t, false, props["fromGo"].(map[string]interface{})["additionalProperties"], "nullable object from a Go literal")
+	assert.NotContains(t, props["text"].(map[string]interface{}), "additionalProperties", "nullable string")
+}
+
+// An object with no "properties" allows any keys, which strict mode cannot express. Closing it with
+// additionalProperties: false would force the model to return {}, so it is left open: the cleaner
+// drops the unsupported additionalProperties schema and adds no false in its place.
+func TestCleanSchemaForOpenAIFreeFormObject(t *testing.T) {
+	schema := map[string]interface{}{
+		"type":                 "object",
+		"additionalProperties": map[string]interface{}{"type": "string"},
+	}
+
+	cleaned := cleanSchemaForOpenAI(schema).(map[string]interface{})
+
+	assert.NotContains(t, cleaned, "additionalProperties")
+}
+
+// Strict mode enforces "enum" and passes "description" to the model, so both survive cleaning;
+// keywords it does not support, such as "minimum", are still removed.
+func TestCleanSchemaForOpenAIKeepsEnumAndDescription(t *testing.T) {
+	schema := map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"sentiment": map[string]interface{}{"type": "string", "enum": []string{"positive", "negative", "neutral"}},
+			"score":     map[string]interface{}{"type": "number", "minimum": 0, "description": "confidence, 0-1"},
+		},
+		"required": []string{"sentiment", "score"},
+	}
+
+	cleaned := cleanSchemaForOpenAI(schema).(map[string]interface{})
+	props := cleaned["properties"].(map[string]interface{})
+	sentiment := props["sentiment"].(map[string]interface{})
+	score := props["score"].(map[string]interface{})
+
+	assert.Equal(t, []string{"positive", "negative", "neutral"}, sentiment["enum"])
+	assert.Equal(t, "confidence, 0-1", score["description"])
+	assert.NotContains(t, score, "minimum")
+}

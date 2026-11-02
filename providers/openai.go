@@ -556,13 +556,14 @@ func (p *OpenAIProvider) PrepareRequestWithSchema(prompt string, options map[str
 	return reqJSON, nil
 }
 
-// cleanSchemaForOpenAI removes validation rules that OpenAI doesn't support
+// cleanSchemaForOpenAI removes validation rules that OpenAI doesn't support. It keeps the structure
+// plus "enum", which strict mode enforces, and "description", which guides the model.
 func cleanSchemaForOpenAI(schema interface{}) interface{} {
 	if schemaMap, ok := schema.(map[string]interface{}); ok {
 		result := make(map[string]interface{})
 		for k, v := range schemaMap {
 			switch k {
-			case "type", "properties", "required", "items":
+			case "type", "properties", "required", "items", "enum", "description":
 				if k == "properties" {
 					props := make(map[string]interface{})
 					if propsMap, ok := v.(map[string]interface{}); ok {
@@ -578,13 +579,37 @@ func cleanSchemaForOpenAI(schema interface{}) interface{} {
 				}
 			}
 		}
-		// Add additionalProperties: false at each object level
-		if schemaMap["type"] == "object" {
+		// Add additionalProperties: false at each object level that lists its properties. An object
+		// with no "properties" means any keys; strict mode cannot express that, and closing it would
+		// force the model to return {}, so it is left open and OpenAI rejects the schema up front.
+		if _, hasProps := schemaMap["properties"]; hasProps && schemaHasType(schemaMap, "object") {
 			result["additionalProperties"] = false
 		}
 		return result
 	}
 	return schema
+}
+
+// schemaHasType reports whether a schema's "type" names typeName, either alone or in a list
+// such as ["object", "null"], which is how a nullable field is written.
+func schemaHasType(schema map[string]interface{}, typeName string) bool {
+	switch t := schema["type"].(type) {
+	case string:
+		return t == typeName
+	case []string:
+		for _, s := range t {
+			if s == typeName {
+				return true
+			}
+		}
+	case []interface{}:
+		for _, v := range t {
+			if v == typeName {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // ParseResponse extracts the generated text from the OpenAI API response.
