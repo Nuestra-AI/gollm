@@ -141,3 +141,60 @@ func TestStreamRequestsDoNotLeakProviderDefaultControlKeys(t *testing.T) {
 	}
 	assertNoLeak(t, "structured", structured)
 }
+
+// Chat Completions only honors strict inside "function"; beside it the flag is silently ignored.
+func TestStrictToolsPlacedInsideFunction(t *testing.T) {
+	p := NewOpenAIProvider("k", "gpt-4o", nil).(*OpenAIProvider)
+	tools := []utils.Tool{{
+		Type: "function",
+		Function: utils.Function{
+			Name:        "f",
+			Description: "d",
+			Parameters:  map[string]any{"type": "object", "properties": map[string]any{}},
+		},
+	}}
+	msgs := []types.MemoryMessage{{Role: "user", Content: "hi"}}
+	schema := map[string]any{"type": "object", "properties": map[string]any{}}
+
+	builders := map[string]func(opts map[string]interface{}) ([]byte, error){
+		"PrepareRequest": func(o map[string]interface{}) ([]byte, error) { return p.PrepareRequest("hi", o) },
+		"PrepareRequestWithMessages": func(o map[string]interface{}) ([]byte, error) {
+			return p.PrepareRequestWithMessages(msgs, o)
+		},
+		"PrepareRequestWithMessagesAndSchema": func(o map[string]interface{}) ([]byte, error) {
+			return p.PrepareRequestWithMessagesAndSchema(msgs, o, schema)
+		},
+		"PrepareStreamRequest": func(o map[string]interface{}) ([]byte, error) { return p.PrepareStreamRequest("hi", o) },
+		"PrepareStreamRequestWithMessages": func(o map[string]interface{}) ([]byte, error) {
+			return p.PrepareStreamRequestWithMessages(msgs, o)
+		},
+	}
+
+	for name, build := range builders {
+		for _, strict := range []bool{true, false} {
+			body, err := build(map[string]interface{}{"tools": tools, "strict_tools": strict})
+			if err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			var req struct {
+				Tools []map[string]json.RawMessage `json:"tools"`
+			}
+			if err := json.Unmarshal(body, &req); err != nil {
+				t.Fatalf("%s: unmarshal: %v", name, err)
+			}
+			if len(req.Tools) != 1 {
+				t.Fatalf("%s: want 1 tool, got %d", name, len(req.Tools))
+			}
+			if _, ok := req.Tools[0]["strict"]; ok {
+				t.Errorf("%s: strict must not sit beside function", name)
+			}
+			var fn map[string]any
+			if err := json.Unmarshal(req.Tools[0]["function"], &fn); err != nil {
+				t.Fatalf("%s: unmarshal function: %v", name, err)
+			}
+			if got, _ := fn["strict"].(bool); got != strict {
+				t.Errorf("%s: strict_tools=%v, function.strict=%v", name, strict, fn["strict"])
+			}
+		}
+	}
+}

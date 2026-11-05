@@ -346,8 +346,8 @@ func (p *OpenAIProvider) PrepareRequest(prompt string, options map[string]interf
 						"name":        tool.Function.Name,
 						"description": tool.Function.Description,
 						"parameters":  tool.Function.Parameters,
+						"strict":      true, // Chat Completions reads it here; beside "function" it's silently ignored
 					},
-					"strict": true, // Add this if you want strict mode
 				})
 			}
 		}
@@ -1288,8 +1288,8 @@ func (p *OpenAIProvider) PrepareRequestWithMessages(messages []types.MemoryMessa
 						"name":        tool.Function.Name,
 						"description": tool.Function.Description,
 						"parameters":  tool.Function.Parameters,
+						"strict":      true, // Chat Completions reads it here; beside "function" it's silently ignored
 					},
-					"strict": true, // Add this if you want strict mode
 				})
 			}
 		}
@@ -1451,18 +1451,15 @@ func (p *OpenAIProvider) PrepareRequestWithMessagesAndSchema(messages []types.Me
 			}
 
 			// Handle regular function tools
-			toolDef := map[string]interface{}{
-				"type": "function",
-				"function": map[string]interface{}{
-					"name":        tool.Function.Name,
-					"description": tool.Function.Description,
-					"parameters":  tool.Function.Parameters,
-				},
+			function := map[string]interface{}{
+				"name":        tool.Function.Name,
+				"description": tool.Function.Description,
+				"parameters":  tool.Function.Parameters,
 			}
 			if strictTools, ok := options["strict_tools"].(bool); ok && strictTools {
-				toolDef["strict"] = true
+				function["strict"] = true // Chat Completions reads it here; beside "function" it's silently ignored
 			}
-			openAITools = append(openAITools, toolDef)
+			openAITools = append(openAITools, map[string]interface{}{"type": "function", "function": function})
 		}
 
 		// Only add tools to request if we have any non-web_search tools
