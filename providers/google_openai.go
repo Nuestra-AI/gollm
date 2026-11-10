@@ -36,6 +36,7 @@ func NewGoogleProvider(apiKey, model string, extraHeaders map[string]string) Pro
 	provider.systemRole = "system"
 	provider.samplingParams = googleSupportedParams
 	provider.samplingScope = "google-openai"
+	provider.schemaKeywords = baseSchemaKeywords
 
 	return provider
 }

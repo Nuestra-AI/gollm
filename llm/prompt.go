@@ -409,7 +409,9 @@ func (p *Prompt) Validate() error {
 }
 
 // GenerateJSONSchema returns a JSON Schema representation of the prompt structure.
-// This schema can be used for validation and documentation purposes.
+// This schema can be used for validation and documentation purposes. It describes the Prompt type
+// itself and uses $ref/$defs, so it is not a response schema for GenerateWithSchema; build those
+// with the package-level GenerateJSONSchema.
 //
 // Parameters:
 //   - opts: Optional schema generation configuration

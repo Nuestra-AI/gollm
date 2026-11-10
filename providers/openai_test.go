@@ -1,6 +1,7 @@
 package providers
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -66,7 +67,7 @@ func TestCleanSchemaForOpenAINullableObject(t *testing.T) {
 		},
 	}
 
-	cleaned := cleanSchemaForOpenAI(schema).(map[string]interface{})
+	cleaned := cleanSchemaForOpenAI(schema, openAISchemaKeywords).(map[string]interface{})
 	props := cleaned["properties"].(map[string]interface{})
 
 	assert.Equal(t, false, cleaned["additionalProperties"], "root object")
@@ -84,29 +85,117 @@ func TestCleanSchemaForOpenAIFreeFormObject(t *testing.T) {
 		"additionalProperties": map[string]interface{}{"type": "string"},
 	}
 
-	cleaned := cleanSchemaForOpenAI(schema).(map[string]interface{})
+	cleaned := cleanSchemaForOpenAI(schema, openAISchemaKeywords).(map[string]interface{})
 
 	assert.NotContains(t, cleaned, "additionalProperties")
 }
 
-// Strict mode enforces "enum" and passes "description" to the model, so both survive cleaning;
-// keywords it does not support, such as "minimum", are still removed.
-func TestCleanSchemaForOpenAIKeepsEnumAndDescription(t *testing.T) {
+// Each provider keeps only the keywords its docs say it enforces. OpenAI's own models keep the value
+// limits; xAI keeps them except multipleOf, which its docs do not list; fine-tuned OpenAI models
+// reject them; Gemini's compat endpoint gets none (see baseSchemaKeywords). Every provider keeps the
+// structure, "enum" and "description". None keeps an unsupported keyword such as minLength, a
+// pattern, a format outside strictFormats, or a value limit on a type it does not constrain.
+func TestCleanSchemaForOpenAIKeywordsPerProvider(t *testing.T) {
 	schema := map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
 			"sentiment": map[string]interface{}{"type": "string", "enum": []string{"positive", "negative", "neutral"}},
-			"score":     map[string]interface{}{"type": "number", "minimum": 0, "description": "confidence, 0-1"},
+			"score":     map[string]interface{}{"type": "number", "minimum": 0, "maximum": 1, "description": "confidence, 0-1"},
+			"count":     map[string]interface{}{"type": []string{"integer", "null"}, "maximum": 5},
+			"step":      map[string]interface{}{"type": "number", "multipleOf": 5},
+			"code":      map[string]interface{}{"type": "string", "pattern": "^[A-Z]{3}$", "minLength": 3},
+			"when":      map[string]interface{}{"type": "string", "format": "date"},
+			"link":      map[string]interface{}{"type": "string", "format": "uri"},
+			"name":      map[string]interface{}{"type": "string", "minimum": 1},
+			"tags":      map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "maxItems": 3},
+			"label":     map[string]interface{}{"type": "string", "maxItems": 2},
 		},
-		"required": []string{"sentiment", "score"},
+		"required": []string{"sentiment", "score", "count", "step", "code", "when", "link", "name", "tags", "label"},
+	}
+	field := func(keywords map[string]bool, name string) map[string]interface{} {
+		cleaned := cleanSchemaForOpenAI(schema, keywords).(map[string]interface{})
+		return cleaned["properties"].(map[string]interface{})[name].(map[string]interface{})
 	}
 
-	cleaned := cleanSchemaForOpenAI(schema).(map[string]interface{})
-	props := cleaned["properties"].(map[string]interface{})
-	sentiment := props["sentiment"].(map[string]interface{})
-	score := props["score"].(map[string]interface{})
+	tests := []struct {
+		name                       string
+		keywords                   map[string]bool
+		wantLimits, wantMultipleOf bool
+	}{
+		{"OpenAI model", strictSchemaKeywords(nil, "gpt-5.4-mini"), true, true},
+		{"fine-tuned OpenAI model", strictSchemaKeywords(nil, "ft:gpt-4o-mini:acme::abc123"), false, false},
+		{"xAI", strictSchemaKeywords(NewXAIProvider("k", "grok-4.7", nil).(*XAIProvider).schemaKeywords, "grok-4.7"), true, false},
+		{"Gemini", strictSchemaKeywords(NewGoogleProvider("k", "gemini-3.5-flash", nil).(*GoogleProvider).schemaKeywords, "gemini-3.5-flash"), false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, []string{"positive", "negative", "neutral"}, field(tt.keywords, "sentiment")["enum"])
+			assert.True(t, strings.HasPrefix(field(tt.keywords, "score")["description"].(string), "confidence, 0-1"), "caller's description kept first")
+			for _, f := range []struct{ name, keyword string }{
+				{"code", "minLength"}, {"code", "pattern"}, {"link", "format"}, {"name", "minimum"}, {"label", "maxItems"},
+			} {
+				assert.NotContains(t, field(tt.keywords, f.name), f.keyword, "%s.%s is never sent", f.name, f.keyword)
+			}
 
-	assert.Equal(t, []string{"positive", "negative", "neutral"}, sentiment["enum"])
-	assert.Equal(t, "confidence, 0-1", score["description"])
-	assert.NotContains(t, score, "minimum")
+			for _, f := range []struct{ name, keyword string }{
+				{"score", "minimum"}, {"score", "maximum"}, {"count", "maximum"}, {"when", "format"}, {"tags", "maxItems"},
+			} {
+				_, kept := field(tt.keywords, f.name)[f.keyword]
+				assert.Equal(t, tt.wantLimits, kept, "%s.%s", f.name, f.keyword)
+			}
+			_, kept := field(tt.keywords, "step")["multipleOf"]
+			assert.Equal(t, tt.wantMultipleOf, kept, "step.multipleOf")
+		})
+	}
+}
+
+// The compat endpoints set their own keyword list; nil means OpenAI's.
+func TestCompatProvidersSetSchemaKeywords(t *testing.T) {
+	assert.Equal(t, baseSchemaKeywords, NewGoogleProvider("k", "gemini-3.5-flash", nil).(*GoogleProvider).schemaKeywords)
+	assert.Equal(t, xaiSchemaKeywords, NewXAIProvider("k", "grok-4.7", nil).(*XAIProvider).schemaKeywords)
+	assert.Nil(t, NewOpenAIProvider("k", "gpt-5.4-mini", nil).(*OpenAIProvider).schemaKeywords)
+	assert.Nil(t, NewOpenAIResponsesProvider("k", "gpt-5.4-pro", nil).(*OpenAIResponsesProvider).schemaKeywords)
+}
+
+// A constraint the endpoint does not take is written into the field's description, so the model is
+// told about a rule gollm's validator then checks; "const" becomes a one-value enum. A constraint on
+// the wrong type for the field is neither sent nor described.
+func TestCleanSchemaForOpenAIDescribesDroppedRules(t *testing.T) {
+	schema := map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"code":   map[string]interface{}{"type": "string", "maxLength": 5, "pattern": "^[A-Z]+$", "description": "A code."},
+			"tags":   map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "uniqueItems": true},
+			"kind":   map[string]interface{}{"type": "string", "const": "fixed"},
+			"score":  map[string]interface{}{"type": "number", "minimum": 0, "maximum": 1},
+			"name":   map[string]interface{}{"type": "string", "minimum": 1},
+			"rating": map[string]interface{}{"type": "number", "minimum": 0, "exclusiveMinimum": true},
+		},
+	}
+	field := func(keywords map[string]bool, name string) map[string]interface{} {
+		cleaned := cleanSchemaForOpenAI(schema, keywords).(map[string]interface{})
+		return cleaned["properties"].(map[string]interface{})[name].(map[string]interface{})
+	}
+	openAI := strictSchemaKeywords(nil, "gpt-5.4-mini")
+	gemini := baseSchemaKeywords
+
+	code := field(openAI, "code")
+	assert.Equal(t, `A code. At most 5 characters. Must match the regular expression "^[A-Z]+$".`, code["description"])
+	assert.NotContains(t, code, "maxLength")
+	assert.NotContains(t, code, "pattern")
+
+	assert.Equal(t, "Items must be unique.", field(openAI, "tags")["description"])
+	assert.Equal(t, []interface{}{"fixed"}, field(openAI, "kind")["enum"])
+	assert.NotContains(t, field(openAI, "kind"), "const")
+
+	assert.Equal(t, 0, field(openAI, "score")["minimum"], "OpenAI takes value limits as keywords")
+	assert.NotContains(t, field(openAI, "score"), "description")
+	assert.Equal(t, "At most 1. At least 0.", field(gemini, "score")["description"], "Gemini gets them as text")
+
+	assert.NotContains(t, field(openAI, "name"), "minimum")
+	assert.NotContains(t, field(openAI, "name"), "description", "a number limit on a string is not described")
+
+	rating := field(openAI, "rating")
+	assert.Equal(t, 0, rating["exclusiveMinimum"], "draft-04 boolean form becomes the numeric form")
+	assert.NotContains(t, rating, "minimum")
 }

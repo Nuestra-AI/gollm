@@ -50,6 +50,19 @@ var xaiResponsesAllowedParams = map[string]bool{
 // and handled by the embedded provider.
 var xaiBuiltinTools = map[string]bool{"x_search": true}
 
+// xaiSchemaKeywords are the strict-schema keywords xAI's output engine enforces, per
+// https://docs.x.ai/docs/guides/structured-outputs (2026-11-10): numeric bounds, format, and
+// minItems/maxItems (guaranteed up to 256). multipleOf is not documented there, so it is dropped.
+// pattern is documented only as an ECMA-262 subset without lookahead, lookbehind, backreferences or
+// \b, so a given pattern cannot be known to be accepted and it is dropped too, as are anyOf and
+// $defs/$ref, which the response validator cannot read.
+var xaiSchemaKeywords = map[string]bool{
+	"type": true, "required": true, "enum": true, "description": true,
+	"minimum": true, "maximum": true, "exclusiveMinimum": true, "exclusiveMaximum": true,
+	"format":   true,
+	"minItems": true, "maxItems": true,
+}
+
 // NewXAIProvider creates a new xAI provider instance.
 //
 // Parameters:
@@ -66,6 +79,7 @@ func NewXAIProvider(apiKey, model string, extraHeaders map[string]string) Provid
 	provider.allowedParams = xaiResponsesAllowedParams
 	provider.adaptOptions = adaptXAIOptions
 	provider.builtinTools = xaiBuiltinTools
+	provider.schemaKeywords = xaiSchemaKeywords
 	return provider
 }
 

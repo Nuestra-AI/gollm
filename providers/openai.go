@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 
 	"github.com/teilomillet/gollm/config"
@@ -32,6 +33,9 @@ type OpenAIProvider struct {
 	// samplingScope labels samplingParams in debug output; method promotion would
 	// otherwise report "openai" from inside an embedding provider.
 	samplingScope string
+	// schemaKeywords bounds which JSON Schema keywords a strict schema keeps, and is set only by
+	// the compat endpoints embedding this provider. Nil means OpenAI's (strictSchemaKeywords).
+	schemaKeywords map[string]bool
 }
 
 // applyCompatSamplingLimits drops sampling parameters an embedding compat endpoint
@@ -456,7 +460,7 @@ func (p *OpenAIProvider) PrepareRequestWithSchema(prompt string, options map[str
 	}
 
 	// Clean the schema for OpenAI by removing unsupported validation rules
-	cleanSchema := cleanSchemaForOpenAI(schemaObj)
+	cleanSchema := cleanSchemaForOpenAI(schemaObj, strictSchemaKeywords(p.schemaKeywords, p.model))
 
 	// Debug log the cleaned schema
 	cleanSchemaJSON, _ := json.MarshalIndent(cleanSchema, "", "  ")
@@ -556,29 +560,115 @@ func (p *OpenAIProvider) PrepareRequestWithSchema(prompt string, options map[str
 	return reqJSON, nil
 }
 
-// cleanSchemaForOpenAI removes validation rules that OpenAI doesn't support. It keeps the structure
-// plus "enum", which strict mode enforces, and "description", which guides the model.
-func cleanSchemaForOpenAI(schema interface{}) interface{} {
+// baseSchemaKeywords are kept for any endpoint whose support for more is not documented: the
+// structure, "enum", which strict mode enforces, and "description", which guides the model.
+// "properties" and "items" are always kept and cleaned recursively. Fine-tuned OpenAI models and
+// Gemini's OpenAI-compatible endpoint get these: Gemini enforces numeric bounds, but a value pushed
+// past one can hang the request for minutes (tested 2026-11-10), so no value limit is sent to it.
+var baseSchemaKeywords = map[string]bool{
+	"type": true, "required": true, "enum": true, "description": true,
+}
+
+// openAISchemaKeywords adds the value limits OpenAI's strict mode enforces on its own models, per
+// https://developers.openai.com/api/docs/guides/structured-outputs (2026-11-10). OpenAI rejects a
+// strict schema carrying a keyword it does not support, and lists these as unsupported on fine-tuned
+// models, so those get baseSchemaKeywords. Left out although documented: "pattern", because which
+// regex features are accepted is not documented, so a given pattern cannot be known to be accepted;
+// and anyOf and $defs/$ref, which the response validator cannot read. keywordApplies further limits
+// each value keyword to the field types it constrains, and "format" to strictFormats.
+var openAISchemaKeywords = map[string]bool{
+	"type": true, "required": true, "enum": true, "description": true,
+	"minimum": true, "maximum": true, "exclusiveMinimum": true, "exclusiveMaximum": true, "multipleOf": true,
+	"format":   true,
+	"minItems": true, "maxItems": true,
+}
+
+// ruleTypes are the field types each constraint keyword constrains. Sent on any other type it is
+// dropped rather than risk a rejection, and not described, since it does not apply there.
+var ruleTypes = map[string][]string{
+	"minimum": {"number", "integer"}, "maximum": {"number", "integer"},
+	"exclusiveMinimum": {"number", "integer"}, "exclusiveMaximum": {"number", "integer"},
+	"multipleOf": {"number", "integer"},
+	"format":     {"string"}, "pattern": {"string"}, "minLength": {"string"}, "maxLength": {"string"},
+	"minItems": {"array"}, "maxItems": {"array"}, "uniqueItems": {"array"},
+	"minProperties": {"object"}, "maxProperties": {"object"},
+}
+
+// ruleFitsType reports whether a constraint keyword applies to this field's type. A keyword with no
+// entry in ruleTypes, such as enum, applies to any type.
+func ruleFitsType(schema map[string]interface{}, keyword string) bool {
+	types, limited := ruleTypes[keyword]
+	if !limited {
+		return true
+	}
+	for _, t := range types {
+		if schemaHasType(schema, t) {
+			return true
+		}
+	}
+	return false
+}
+
+// strictFormats are the "format" values both OpenAI and xAI document for strict schemas. Any other
+// value, such as GenerateJSONSchema's "uri", is dropped.
+var strictFormats = map[string]bool{
+	"date-time": true, "date": true, "time": true, "email": true, "uuid": true, "ipv4": true, "ipv6": true,
+}
+
+// keywordApplies reports whether a kept keyword's value can be sent on this schema node.
+func keywordApplies(schema map[string]interface{}, keyword string, value interface{}) bool {
+	if !ruleFitsType(schema, keyword) {
+		return false
+	}
+	if keyword == "format" {
+		format, _ := value.(string)
+		return strictFormats[format]
+	}
+	return true
+}
+
+// strictSchemaKeywords picks the keywords a schema keeps for a model. compat is what an endpoint
+// embedding an OpenAI provider supports; nil means OpenAI itself.
+func strictSchemaKeywords(compat map[string]bool, model string) map[string]bool {
+	if compat != nil {
+		return compat
+	}
+	if strings.HasPrefix(model, "ft:") {
+		return baseSchemaKeywords
+	}
+	return openAISchemaKeywords
+}
+
+// cleanSchemaForOpenAI keeps the keywords a strict json_schema endpoint accepts and drops the rest,
+// recursing into "properties" and "items". A dropped constraint that gollm's validator enforces is
+// written into the field's description, so the model is told about a rule its response is checked
+// against; "const" becomes a one-value "enum", which every strict endpoint enforces.
+func cleanSchemaForOpenAI(schema interface{}, keywords map[string]bool) interface{} {
 	if schemaMap, ok := schema.(map[string]interface{}); ok {
+		schemaMap = utils.NormalizeExclusiveBounds(schemaMap)
 		result := make(map[string]interface{})
+		var dropped []string
 		for k, v := range schemaMap {
-			switch k {
-			case "type", "properties", "required", "items", "enum", "description":
-				if k == "properties" {
-					props := make(map[string]interface{})
-					if propsMap, ok := v.(map[string]interface{}); ok {
-						for propName, propSchema := range propsMap {
-							props[propName] = cleanSchemaForOpenAI(propSchema)
-						}
+			switch {
+			case k == "properties":
+				props := make(map[string]interface{})
+				if propsMap, ok := v.(map[string]interface{}); ok {
+					for propName, propSchema := range propsMap {
+						props[propName] = cleanSchemaForOpenAI(propSchema, keywords)
 					}
-					result[k] = props
-				} else if k == "items" {
-					result[k] = cleanSchemaForOpenAI(v)
-				} else {
-					result[k] = v
 				}
+				result[k] = props
+			case k == "items":
+				result[k] = cleanSchemaForOpenAI(v, keywords)
+			case keywords[k] && keywordApplies(schemaMap, k, v):
+				result[k] = v
+			case k == "const" && keywords["enum"] && schemaMap["enum"] == nil:
+				result["enum"] = []interface{}{v}
+			default:
+				dropped = append(dropped, k)
 			}
 		}
+		describeDroppedRules(result, schemaMap, dropped)
 		// Add additionalProperties: false at each object level that lists its properties. An object
 		// with no "properties" means any keys; strict mode cannot express that, and closing it would
 		// force the model to return {}, so it is left open and OpenAI rejects the schema up front.
@@ -590,23 +680,36 @@ func cleanSchemaForOpenAI(schema interface{}) interface{} {
 	return schema
 }
 
+// describeDroppedRules appends a sentence to result's description for each dropped keyword that
+// constrains this field's type, in keyword order so the request is stable.
+func describeDroppedRules(result, schema map[string]interface{}, dropped []string) {
+	sort.Strings(dropped)
+	var sentences []string
+	for _, k := range dropped {
+		if !ruleFitsType(schema, k) {
+			continue
+		}
+		if sentence, ok := utils.DescribeSchemaRule(k, schema[k]); ok {
+			sentences = append(sentences, sentence)
+		}
+	}
+	if len(sentences) == 0 {
+		return
+	}
+	text := strings.Join(sentences, " ")
+	if existing, ok := result["description"].(string); ok && existing != "" {
+		text = existing + " " + text
+	}
+	result["description"] = text
+}
+
 // schemaHasType reports whether a schema's "type" names typeName, either alone or in a list
 // such as ["object", "null"], which is how a nullable field is written.
 func schemaHasType(schema map[string]interface{}, typeName string) bool {
-	switch t := schema["type"].(type) {
-	case string:
-		return t == typeName
-	case []string:
-		for _, s := range t {
-			if s == typeName {
-				return true
-			}
-		}
-	case []interface{}:
-		for _, v := range t {
-			if v == typeName {
-				return true
-			}
+	types, _ := utils.SchemaTypes(schema["type"])
+	for _, t := range types {
+		if t == typeName {
+			return true
 		}
 	}
 	return false
@@ -1418,7 +1521,7 @@ func (p *OpenAIProvider) PrepareRequestWithMessagesAndSchema(messages []types.Me
 	}
 
 	// Clean the schema for OpenAI by removing unsupported validation rules
-	cleanSchema := cleanSchemaForOpenAI(schemaObj)
+	cleanSchema := cleanSchemaForOpenAI(schemaObj, strictSchemaKeywords(p.schemaKeywords, p.model))
 
 	// Debug log the cleaned schema
 	cleanSchemaJSON, _ := json.MarshalIndent(cleanSchema, "", "  ")

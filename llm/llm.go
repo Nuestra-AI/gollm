@@ -478,6 +478,11 @@ func (l *LLMImpl) GenerateWithSchema(ctx context.Context, prompt *Prompt, schema
 		opt(config)
 	}
 
+	// A schema the validator cannot read fails every response, so it is rejected before any billed attempt.
+	if err := ValidateSchema(schema); err != nil {
+		return "", NewLLMError(ErrorTypeInvalidInput, "invalid schema", err)
+	}
+
 	var result string
 	var lastErr error
 
@@ -577,6 +582,11 @@ func (l *LLMImpl) GenerateWithSchemaAndUsage(ctx context.Context, prompt *Prompt
 	config := &GenerateConfig{}
 	for _, opt := range opts {
 		opt(config)
+	}
+
+	// A schema the validator cannot read fails every response, so it is rejected before any billed attempt.
+	if err := ValidateSchema(schema); err != nil {
+		return "", nil, NewLLMError(ErrorTypeInvalidInput, "invalid schema", err)
 	}
 
 	var result string

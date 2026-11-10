@@ -28,6 +28,9 @@ type OpenAIResponsesProvider struct {
 	allowedParams map[string]bool
 	adaptOptions  func(model string, request map[string]interface{})
 	builtinTools  map[string]bool
+	// schemaKeywords bounds which JSON Schema keywords a strict schema keeps. Nil means OpenAI's
+	// (strictSchemaKeywords).
+	schemaKeywords map[string]bool
 }
 
 // NewOpenAIResponsesProvider creates a new OpenAI Responses API provider.
@@ -385,7 +388,7 @@ func (p *OpenAIResponsesProvider) PrepareRequestWithSchema(prompt string, option
 		return nil, fmt.Errorf("failed to normalize schema: %w", err)
 	}
 
-	cleanSchema := cleanSchemaForOpenAI(schemaObj) // defined in openai.go
+	cleanSchema := cleanSchemaForOpenAI(schemaObj, strictSchemaKeywords(p.schemaKeywords, p.model)) // defined in openai.go
 
 	request := map[string]interface{}{
 		"model": p.model,
@@ -452,7 +455,7 @@ func (p *OpenAIResponsesProvider) PrepareRequestWithMessagesAndSchema(messages [
 		return nil, fmt.Errorf("failed to normalize schema: %w", err)
 	}
 
-	cleanSchema := cleanSchemaForOpenAI(schemaObj) // defined in openai.go
+	cleanSchema := cleanSchemaForOpenAI(schemaObj, strictSchemaKeywords(p.schemaKeywords, p.model)) // defined in openai.go
 
 	request := map[string]interface{}{
 		"model": p.model,
