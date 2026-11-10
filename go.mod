@@ -30,3 +30,6 @@ require (
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
 )
+
+// Fork-only (Nuestra-AI/gollm); do not send upstream, where it would retract upstream's own v0.6.0.
+retract v0.6.0 // Published in error; same code as v0.5.4. Use v0.6.1 or later.
